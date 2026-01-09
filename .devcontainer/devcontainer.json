@@ -1,0 +1,11 @@
+{
+  "name": "dworm-test",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "remoteUser": "developer",
+  "workspaceFolder": "/home/developer/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/home/developer/workspace,type=bind",
+  "postStartCommand": "echo 'Devcontainer ready'"
+}
