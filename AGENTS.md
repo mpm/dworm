@@ -22,12 +22,13 @@ internal/
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
 │   ├── shell.go            # Interactive shell via docker exec
-│   └── agent.go            # SSH agent forwarding (accepts streams from endpoint)
+│   └── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
 └── endpoint/               # Container-side only
     ├── server.go           # Main server loop, handles control messages
     ├── portscanner.go      # Scans /proc/net/tcp for listening ports
     ├── env.go              # Environment variable handling
-    └── agent.go            # SSH agent forwarding (Unix socket listener)
+    ├── agent.go            # SSH agent forwarding (Unix socket listener)
+    └── gpg.go              # GPG agent forwarding (Unix socket listener)
 ```
 
 ## Key Components
@@ -44,10 +45,11 @@ Message flow:
 3. Host opens new yamux stream for each tunnel connection
 4. Stream header: 4-byte port number, 1-byte success response
 
-SSH agent forwarding (reverse direction):
-1. Endpoint creates Unix socket at `/tmp/dworm-ssh-agent.sock`
-2. When client connects, endpoint opens yamux stream to host with `StreamTypeAgent` marker
-3. Host accepts stream, connects to local `SSH_AUTH_SOCK`, proxies bidirectionally
+Agent forwarding (reverse direction, endpoint → host):
+- Stream type markers: `StreamTypeAgent` (0x01) for SSH, `StreamTypeGPG` (0x02) for GPG
+- SSH: Endpoint creates socket at `/tmp/dworm-ssh-agent.sock`, sets `SSH_AUTH_SOCK` env var
+- GPG: Endpoint runs `gpgconf --list-dirs agent-socket` to find expected path (e.g., `~/.gnupg/S.gpg-agent`), kills existing agent, creates socket there
+- On client connect: endpoint opens yamux stream to host with type marker, host proxies to local agent socket
 
 ### Host Binary (`cmd/dworm/`)
 
@@ -131,11 +133,12 @@ const (
 
 ### Add new credential forwarding
 
-SSH agent forwarding is implemented. To add other credential forwarding (e.g., GPG):
-1. Add stream type constant in `internal/protocol/messages.go`
-2. Create Unix socket listener in endpoint (similar to `agent.go`)
-3. Add stream acceptor on host side (similar to `host/agent.go`)
-4. Set up environment variable in shell
+SSH and GPG agent forwarding are implemented. To add other credential forwarding:
+1. Add stream type constant in `internal/protocol/messages.go` (e.g., `StreamTypeMyAgent byte = 0x03`)
+2. Add fields to `InitMessage` for forwarding config
+3. Create Unix socket listener in endpoint (similar to `gpg.go`)
+4. Extend `host/agent.go` `handleStream()` switch to handle new stream type
+5. Update `cmd/dworm/main.go` to detect host socket, send config in init, set env vars if needed
 
 ## Dependencies
 

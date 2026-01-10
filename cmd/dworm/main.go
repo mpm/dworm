@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -106,6 +107,24 @@ func parseEnvVars() map[string]string {
 	return result
 }
 
+// getGPGAgentSocket returns the GPG agent socket path using gpgconf
+func getGPGAgentSocket() (string, error) {
+	cmd := exec.Command("gpgconf", "--list-dirs", "agent-socket")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gpgconf failed: %w", err)
+	}
+	socketPath := strings.TrimSpace(string(output))
+	if socketPath == "" {
+		return "", fmt.Errorf("gpgconf returned empty socket path")
+	}
+	// Check if socket exists
+	if _, err := os.Stat(socketPath); err != nil {
+		return "", fmt.Errorf("GPG agent socket does not exist: %s", socketPath)
+	}
+	return socketPath, nil
+}
+
 func runUp(cmd *cobra.Command, args []string) error {
 	workspacePath, err := getWorkspacePath(args)
 	if err != nil {
@@ -137,29 +156,57 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check for SSH agent forwarding
-	hostAgentSocket := os.Getenv("SSH_AUTH_SOCK")
-	agentForward := hostAgentSocket != ""
-	containerAgentSocket := "/tmp/dworm-ssh-agent.sock"
+	hostSSHSocket := os.Getenv("SSH_AUTH_SOCK")
+	sshForward := hostSSHSocket != ""
+	containerSSHSocket := "/tmp/dworm-ssh-agent.sock"
+
+	if !sshForward {
+		logger.Printf("Warning: SSH agent forwarding disabled (SSH_AUTH_SOCK not set)")
+	} else {
+		// Verify socket exists
+		if _, err := os.Stat(hostSSHSocket); err != nil {
+			logger.Printf("Warning: SSH agent forwarding disabled (socket not found: %s)", hostSSHSocket)
+			sshForward = false
+		}
+	}
+
+	// Check for GPG agent forwarding
+	hostGPGSocket, gpgErr := getGPGAgentSocket()
+	gpgForward := gpgErr == nil
+	containerGPGSocket := "/tmp/dworm-gpg-agent.sock"
+
+	if !gpgForward {
+		logger.Printf("Warning: GPG agent forwarding disabled (%v)", gpgErr)
+	}
 
 	// Send init message
 	envs := parseEnvVars()
-	if err := endpoint.SendInit(envs, agentForward, containerAgentSocket); err != nil {
+	if err := endpoint.SendInit(envs, sshForward, containerSSHSocket, gpgForward, containerGPGSocket); err != nil {
 		endpoint.Close()
 		return fmt.Errorf("failed to send init: %w", err)
 	}
 
-	if agentForward {
+	if sshForward {
 		logger.Printf("SSH agent forwarding enabled")
 		// Add SSH_AUTH_SOCK to env vars for the shell
-		envs["SSH_AUTH_SOCK"] = containerAgentSocket
+		envs["SSH_AUTH_SOCK"] = containerSSHSocket
+	}
+
+	if gpgForward {
+		logger.Printf("GPG agent forwarding enabled")
+		// Note: The endpoint creates the socket at the path GPG expects,
+		// so no environment variable is needed - GPG will find it automatically
 	}
 
 	logger.Printf("Endpoint initialized with %d env vars", len(envs))
 
-	// Start agent handler if forwarding is enabled
+	// Start agent handler if any forwarding is enabled
 	var agentHandler *host.AgentHandler
-	if agentForward {
-		agentHandler = host.NewAgentHandler(endpoint.GetMux(), hostAgentSocket, logger)
+	if sshForward || gpgForward {
+		agentHandler = host.NewAgentHandler(endpoint.GetMux(), hostSSHSocket, logger)
+		if gpgForward {
+			agentHandler.SetGPGSocketPath(hostGPGSocket)
+		}
 		agentHandler.Start()
 	}
 

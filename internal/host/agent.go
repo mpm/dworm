@@ -9,22 +9,28 @@ import (
 	"github.com/mpm/dworm/internal/protocol"
 )
 
-// AgentHandler accepts agent forwarding streams from the endpoint
+// AgentHandler accepts agent forwarding streams from the endpoint (SSH and GPG)
 type AgentHandler struct {
-	mux            *protocol.Mux
-	hostSocketPath string
-	logger         *log.Logger
-	closed         bool
-	closeMu        sync.Mutex
+	mux           *protocol.Mux
+	sshSocketPath string
+	gpgSocketPath string
+	logger        *log.Logger
+	closed        bool
+	closeMu       sync.Mutex
 }
 
-// NewAgentHandler creates a new agent handler
-func NewAgentHandler(mux *protocol.Mux, hostSocketPath string, logger *log.Logger) *AgentHandler {
+// NewAgentHandler creates a new agent handler for SSH agent forwarding
+func NewAgentHandler(mux *protocol.Mux, sshSocketPath string, logger *log.Logger) *AgentHandler {
 	return &AgentHandler{
-		mux:            mux,
-		hostSocketPath: hostSocketPath,
-		logger:         logger,
+		mux:           mux,
+		sshSocketPath: sshSocketPath,
+		logger:        logger,
 	}
+}
+
+// SetGPGSocketPath enables GPG agent forwarding with the given socket path
+func (a *AgentHandler) SetGPGSocketPath(gpgSocketPath string) {
+	a.gpgSocketPath = gpgSocketPath
 }
 
 // Start begins accepting agent streams from the endpoint
@@ -60,16 +66,32 @@ func (a *AgentHandler) handleStream(stream net.Conn) {
 		return
 	}
 
-	if typeBuf[0] != protocol.StreamTypeAgent {
+	var socketPath string
+	var agentType string
+
+	switch typeBuf[0] {
+	case protocol.StreamTypeAgent:
+		socketPath = a.sshSocketPath
+		agentType = "SSH"
+	case protocol.StreamTypeGPG:
+		socketPath = a.gpgSocketPath
+		agentType = "GPG"
+	default:
 		a.logger.Printf("Unknown stream type: %d", typeBuf[0])
 		stream.Write([]byte{0}) // failure
 		return
 	}
 
-	// Connect to local SSH agent
-	agentConn, err := net.Dial("unix", a.hostSocketPath)
+	if socketPath == "" {
+		a.logger.Printf("%s agent forwarding not enabled", agentType)
+		stream.Write([]byte{0}) // failure
+		return
+	}
+
+	// Connect to local agent socket
+	agentConn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		a.logger.Printf("Failed to connect to SSH agent: %v", err)
+		a.logger.Printf("Failed to connect to %s agent: %v", agentType, err)
 		stream.Write([]byte{0}) // failure
 		return
 	}

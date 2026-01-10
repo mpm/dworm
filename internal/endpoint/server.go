@@ -19,6 +19,7 @@ type Server struct {
 	currentPorts   []int
 	logger         *log.Logger
 	agentForwarder *AgentForwarder
+	gpgForwarder   *GPGForwarder
 }
 
 // NewServer creates a new endpoint server
@@ -87,6 +88,14 @@ func (s *Server) waitForInit() error {
 		s.agentForwarder = NewAgentForwarder(initMsg.AgentSocketPath, s.mux, s.logger)
 		if err := s.agentForwarder.Start(); err != nil {
 			s.logger.Printf("Warning: failed to start agent forwarder: %v", err)
+		}
+	}
+
+	// Start GPG agent forwarder if enabled
+	if initMsg.GPGForward && initMsg.GPGSocketPath != "" {
+		s.gpgForwarder = NewGPGForwarder(initMsg.GPGSocketPath, s.mux, s.logger)
+		if err := s.gpgForwarder.Start(); err != nil {
+			s.logger.Printf("Warning: failed to start GPG agent forwarder: %v", err)
 		}
 	}
 
@@ -217,6 +226,9 @@ func (s *Server) handleControlMessages() error {
 func (s *Server) cleanup() {
 	if s.agentForwarder != nil {
 		s.agentForwarder.Close()
+	}
+	if s.gpgForwarder != nil {
+		s.gpgForwarder.Close()
 	}
 	if s.mux != nil {
 		s.mux.Close()
