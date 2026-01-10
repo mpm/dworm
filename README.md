@@ -6,6 +6,9 @@ A CLI tool that bridges your host machine and devcontainer environments, providi
 
 - **Automatic Port Forwarding**: Detects listening ports inside the container (1024-20000) and forwards them to localhost
 - **SSH Agent Forwarding**: Use your host SSH keys inside the container (automatic when `SSH_AUTH_SOCK` is set)
+- **GPG Agent Forwarding**: Sign commits with your host GPG keys (automatic when gpg-agent is running)
+- **Git Configuration Forwarding**: Host's `~/.gitconfig` is copied to the container (user.name, email, aliases, etc.)
+- **Git Credential Forwarding**: Push/pull to private repos using host's credential helpers
 - **Environment Variable Injection**: Pass environment variables from host to container
 - **Shell Access**: Interactive shell with all forwarding active
 - **Daemon Mode**: Run in foreground for integration with other tools
@@ -96,6 +99,39 @@ developer@container:~$ git clone git@github.com:user/repo.git
 # Works without copying keys!
 ```
 
+### GPG agent forwarding
+
+GPG agent forwarding is automatic when gpg-agent is running on your host:
+
+```bash
+# Verify GPG agent is running and has keys
+$ gpg --list-secret-keys
+/home/user/.gnupg/pubring.kbx
+-----------------------------
+sec   ed25519 2024-01-01 [SC]
+      ABC123...
+
+# Start dworm (GPG forwarding is automatic)
+$ dworm up .
+
+# Inside the container, sign commits with your host key
+developer@container:~$ git commit -S -m "Signed commit"
+```
+
+### Git configuration and credentials
+
+Your host's `~/.gitconfig` is automatically copied to the container, so `user.name`, `user.email`, aliases, and other settings work seamlessly.
+
+Git credential forwarding proxies credential requests to the host, allowing you to push/pull from private repositories:
+
+```bash
+$ dworm up .
+
+# Inside the container
+developer@container:~$ git push origin main
+# Uses host's credential helper - no authentication prompts!
+```
+
 ## How It Works
 
 1. **dworm** (host) starts the devcontainer using the devcontainer CLI
@@ -131,7 +167,6 @@ dworm uses standard devcontainer configuration. Create a `.devcontainer/devconta
 
 ## Limitations
 
-- GPG agent forwarding not yet implemented
 - No automatic reconnection on disconnect
 - Port range limited to 1024-20000
 - Linux containers only (endpoint binary is Linux amd64)
