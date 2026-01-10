@@ -31,8 +31,14 @@ internal/
 │   ├── container.go        # Devcontainer lifecycle (up/down via devcontainer CLI + docker)
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
-│   ├── shell.go            # Interactive shell via docker exec
-│   └── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
+│   ├── shell.go            # Interactive shell via docker exec (fallback)
+│   ├── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
+│   └── tui/                # Terminal UI for interactive shell
+│       ├── session.go      # Shell session with PTY and status line
+│       ├── statusline.go   # Bottom status bar showing container/ports
+│       ├── termwriter.go   # Terminal output wrapper
+│       ├── ansi.go         # ANSI escape sequence helpers
+│       └── pty.go          # PTY utilities
 └── endpoint/               # Container-side only
     ├── server.go           # Main server loop, handles control messages
     ├── portscanner.go      # Scans /proc/net/tcp for listening ports
@@ -103,8 +109,16 @@ Parses `/proc/net/tcp` and `/proc/net/tcp6`:
 ### Tunnel Manager (`internal/host/tunnel.go`)
 
 For each detected port:
-1. Listen on `127.0.0.1:<port>`
+1. Listen on configured bind address (default `127.0.0.1`, configurable via `--bind` flag)
 2. On connection: open yamux stream, send port header, proxy bidirectionally
+
+### TUI Shell Session (`internal/host/tui/`)
+
+Interactive shell with status line showing container name and forwarded ports:
+- Uses PTY for proper terminal handling (resize, raw mode)
+- Status line at bottom of terminal shows: container name, forwarded ports
+- Toggle expanded port view with Ctrl+G
+- Falls back to basic `docker exec` shell if not running in a TTY
 
 ## Build
 
@@ -216,6 +230,7 @@ Host: yamux stream → git credential fill/approve/reject → response
 
 - `github.com/spf13/cobra` - CLI framework
 - `github.com/hashicorp/yamux` - Stream multiplexing
+- `golang.org/x/term` - Terminal handling for TUI
 
 ## Error Handling Patterns
 
