@@ -14,10 +14,11 @@ import (
 
 // Server is the endpoint server running inside the container
 type Server struct {
-	mux          *protocol.Mux
-	envVars      map[string]string
-	currentPorts []int
-	logger       *log.Logger
+	mux            *protocol.Mux
+	envVars        map[string]string
+	currentPorts   []int
+	logger         *log.Logger
+	agentForwarder *AgentForwarder
 }
 
 // NewServer creates a new endpoint server
@@ -42,7 +43,7 @@ func (s *Server) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to create mux: %w", err)
 	}
-	defer s.mux.Close()
+	defer s.cleanup()
 
 	// Wait for init message
 	if err := s.waitForInit(); err != nil {
@@ -79,6 +80,14 @@ func (s *Server) waitForInit() error {
 	// Set environment variables
 	if err := SetEnvironment(s.envVars); err != nil {
 		s.logger.Printf("Warning: failed to set some env vars: %v", err)
+	}
+
+	// Start SSH agent forwarder if enabled
+	if initMsg.AgentForward && initMsg.AgentSocketPath != "" {
+		s.agentForwarder = NewAgentForwarder(initMsg.AgentSocketPath, s.mux, s.logger)
+		if err := s.agentForwarder.Start(); err != nil {
+			s.logger.Printf("Warning: failed to start agent forwarder: %v", err)
+		}
 	}
 
 	s.logger.Printf("Initialized with %d env vars", len(s.envVars))
@@ -202,6 +211,15 @@ func (s *Server) handleControlMessages() error {
 		default:
 			s.logger.Printf("Unknown message type: %s (data: %s)", msgType, string(data))
 		}
+	}
+}
+
+func (s *Server) cleanup() {
+	if s.agentForwarder != nil {
+		s.agentForwarder.Close()
+	}
+	if s.mux != nil {
+		s.mux.Close()
 	}
 }
 

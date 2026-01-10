@@ -1,4 +1,6 @@
-# CLAUDE.md — Agent Guide for dworm
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository
 
 ## Project Overview
 
@@ -19,11 +21,13 @@ internal/
 │   ├── container.go        # Devcontainer lifecycle (up/down via devcontainer CLI + docker)
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
-│   └── shell.go            # Interactive shell via docker exec
+│   ├── shell.go            # Interactive shell via docker exec
+│   └── agent.go            # SSH agent forwarding (accepts streams from endpoint)
 └── endpoint/               # Container-side only
     ├── server.go           # Main server loop, handles control messages
     ├── portscanner.go      # Scans /proc/net/tcp for listening ports
-    └── env.go              # Environment variable handling
+    ├── env.go              # Environment variable handling
+    └── agent.go            # SSH agent forwarding (Unix socket listener)
 ```
 
 ## Key Components
@@ -35,10 +39,15 @@ internal/
 - **Tunnel streams**: Stream 1+, raw TCP proxy data
 
 Message flow:
-1. Host sends `init` with env vars
+1. Host sends `init` with env vars and agent forwarding config
 2. Endpoint sends `port_update` when listening ports change
 3. Host opens new yamux stream for each tunnel connection
 4. Stream header: 4-byte port number, 1-byte success response
+
+SSH agent forwarding (reverse direction):
+1. Endpoint creates Unix socket at `/tmp/dworm-ssh-agent.sock`
+2. When client connects, endpoint opens yamux stream to host with `StreamTypeAgent` marker
+3. Host accepts stream, connects to local `SSH_AUTH_SOCK`, proxies bidirectionally
 
 ### Host Binary (`cmd/dworm/`)
 
@@ -120,13 +129,13 @@ const (
 )
 ```
 
-### Add credential forwarding (future)
+### Add new credential forwarding
 
-Would require:
-1. New message types for socket forwarding
-2. Unix socket listener in endpoint
-3. Socket proxy over yamux streams
-4. Environment variable setup (SSH_AUTH_SOCK, etc.)
+SSH agent forwarding is implemented. To add other credential forwarding (e.g., GPG):
+1. Add stream type constant in `internal/protocol/messages.go`
+2. Create Unix socket listener in endpoint (similar to `agent.go`)
+3. Add stream acceptor on host side (similar to `host/agent.go`)
+4. Set up environment variable in shell
 
 ## Dependencies
 

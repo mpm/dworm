@@ -84,11 +84,18 @@ func (e *EndpointManager) InjectAndStart(endpointBinaryPath string) error {
 	return nil
 }
 
-// SendInit sends the init message with environment variables
-func (e *EndpointManager) SendInit(envVars map[string]string) error {
+// SendInit sends the init message with environment variables and agent forwarding config
+func (e *EndpointManager) SendInit(envVars map[string]string, agentForward bool, agentSocketPath string) error {
 	return e.mux.SendControl(protocol.TypeInit, &protocol.InitMessage{
-		EnvVars: envVars,
+		EnvVars:         envVars,
+		AgentForward:    agentForward,
+		AgentSocketPath: agentSocketPath,
 	})
+}
+
+// GetMux returns the underlying multiplexer for agent handling
+func (e *EndpointManager) GetMux() *protocol.Mux {
+	return e.mux
 }
 
 // RecvControl receives a control message

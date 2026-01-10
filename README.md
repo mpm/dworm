@@ -5,6 +5,7 @@ A CLI tool that bridges your host machine and devcontainer environments, providi
 ## Features
 
 - **Automatic Port Forwarding**: Detects listening ports inside the container (1024-20000) and forwards them to localhost
+- **SSH Agent Forwarding**: Use your host SSH keys inside the container (automatic when `SSH_AUTH_SOCK` is set)
 - **Environment Variable Injection**: Pass environment variables from host to container
 - **Shell Access**: Interactive shell with all forwarding active
 - **Daemon Mode**: Run in foreground for integration with other tools
@@ -62,6 +63,7 @@ dworm status .
 # Terminal 1: Start dworm
 $ dworm up . --daemon
 2024/01/09 22:39:03 Container started: myproject-dev
+2024/01/09 22:39:03 SSH agent forwarding enabled
 Forwarding localhost:3000 -> container:3000
 Forwarding localhost:5432 -> container:5432
 
@@ -72,6 +74,26 @@ Hello from container!
 # Terminal 3: Work in the container
 $ dworm shell .
 developer@container:~$ npm run dev
+```
+
+### SSH agent forwarding
+
+SSH agent forwarding is automatic when `SSH_AUTH_SOCK` is set on your host:
+
+```bash
+# Verify SSH agent is running on host
+$ ssh-add -l
+256 SHA256:... user@host (ED25519)
+
+# Start dworm (agent forwarding is automatic)
+$ dworm up .
+
+# Inside the container, your keys are available
+developer@container:~$ ssh-add -l
+256 SHA256:... user@host (ED25519)
+
+developer@container:~$ git clone git@github.com:user/repo.git
+# Works without copying keys!
 ```
 
 ## How It Works
@@ -107,9 +129,9 @@ dworm uses standard devcontainer configuration. Create a `.devcontainer/devconta
 }
 ```
 
-## Limitations (v1)
+## Limitations
 
-- No credential forwarding (SSH agent, GPG) yet
+- GPG agent forwarding not yet implemented
 - No automatic reconnection on disconnect
 - Port range limited to 1024-20000
 - Linux containers only (endpoint binary is Linux amd64)

@@ -15,6 +15,11 @@ const (
 	TypePong          = "pong"
 )
 
+// Stream type markers (first byte of streams opened by endpoint)
+const (
+	StreamTypeAgent byte = 0x01 // SSH agent forwarding stream
+)
+
 // Message is the base envelope for all protocol messages
 type Message struct {
 	Type string          `json:"type"`
@@ -23,7 +28,9 @@ type Message struct {
 
 // InitMessage is sent from host to endpoint at startup
 type InitMessage struct {
-	EnvVars map[string]string `json:"env_vars"`
+	EnvVars         map[string]string `json:"env_vars"`
+	AgentForward    bool              `json:"agent_forward"`               // Whether to enable SSH agent forwarding
+	AgentSocketPath string            `json:"agent_socket_path,omitempty"` // Path for agent socket in container
 }
 
 // PortUpdateMessage is sent from endpoint to host when ports change

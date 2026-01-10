@@ -136,14 +136,32 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start endpoint: %w", err)
 	}
 
+	// Check for SSH agent forwarding
+	hostAgentSocket := os.Getenv("SSH_AUTH_SOCK")
+	agentForward := hostAgentSocket != ""
+	containerAgentSocket := "/tmp/dworm-ssh-agent.sock"
+
 	// Send init message
 	envs := parseEnvVars()
-	if err := endpoint.SendInit(envs); err != nil {
+	if err := endpoint.SendInit(envs, agentForward, containerAgentSocket); err != nil {
 		endpoint.Close()
 		return fmt.Errorf("failed to send init: %w", err)
 	}
 
+	if agentForward {
+		logger.Printf("SSH agent forwarding enabled")
+		// Add SSH_AUTH_SOCK to env vars for the shell
+		envs["SSH_AUTH_SOCK"] = containerAgentSocket
+	}
+
 	logger.Printf("Endpoint initialized with %d env vars", len(envs))
+
+	// Start agent handler if forwarding is enabled
+	var agentHandler *host.AgentHandler
+	if agentForward {
+		agentHandler = host.NewAgentHandler(endpoint.GetMux(), hostAgentSocket, logger)
+		agentHandler.Start()
+	}
 
 	// Create tunnel manager
 	tunnels := host.NewTunnelManager(endpoint)
@@ -206,6 +224,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	tunnels.Close()
+	if agentHandler != nil {
+		agentHandler.Close()
+	}
 	endpoint.Close()
 
 	return nil
