@@ -91,7 +91,7 @@ func (g *GitCredForwarder) handleConnection(conn net.Conn) {
 	action := actionBuf[0]
 
 	// Read rest as input (read until EOF or a reasonable limit)
-	input, err := io.ReadAll(io.LimitReader(conn, 64*1024))
+	input, err := io.ReadAll(io.LimitReader(conn, protocol.MaxGitCredentialInput))
 	if err != nil {
 		g.logger.Printf("Failed to read git credential input: %v", err)
 		return
@@ -174,11 +174,6 @@ func (g *GitCredForwarder) Close() error {
 	}
 	os.Remove(g.socketPath)
 	return nil
-}
-
-// SocketPath returns the path to the credential socket
-func (g *GitCredForwarder) SocketPath() string {
-	return g.socketPath
 }
 
 // RunCredentialHelper is called when the endpoint binary is invoked with --credential-helper flag

@@ -99,19 +99,7 @@ func (a *AgentForwarder) handleConnection(conn net.Conn) {
 	}
 
 	// Proxy data bidirectionally
-	done := make(chan struct{}, 2)
-
-	go func() {
-		io.Copy(stream, conn)
-		done <- struct{}{}
-	}()
-
-	go func() {
-		io.Copy(conn, stream)
-		done <- struct{}{}
-	}()
-
-	<-done
+	protocol.BiProxy(conn, stream)
 }
 
 // Close stops the agent forwarder
@@ -125,9 +113,4 @@ func (a *AgentForwarder) Close() error {
 	}
 	os.Remove(a.socketPath)
 	return nil
-}
-
-// SocketPath returns the path to the agent socket
-func (a *AgentForwarder) SocketPath() string {
-	return a.socketPath
 }

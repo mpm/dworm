@@ -99,27 +99,26 @@ func getContainerName(containerID string) (string, error) {
 	return name, nil
 }
 
-// GetContainerID gets the container ID for a workspace path
+// GetContainerID gets the container ID for a workspace path using Docker label query.
+// This is a read-only operation that doesn't start or modify containers.
 func GetContainerID(workspacePath string) (string, error) {
-	// Use devcontainer to get container info
-	cmd := exec.Command("devcontainer", "up", "--workspace-folder", workspacePath)
+	// Query Docker for container with matching devcontainer label
+	cmd := exec.Command("docker", "ps", "-q", "--filter",
+		fmt.Sprintf("label=devcontainer.local_folder=%s", workspacePath))
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
 	if err := cmd.Run(); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to query containers: %w", err)
 	}
 
-	var result struct {
-		ContainerID string `json:"containerId"`
+	containerID := strings.TrimSpace(stdout.String())
+	if containerID == "" {
+		return "", fmt.Errorf("no running container found for %s", workspacePath)
 	}
 
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return "", err
-	}
-
-	return result.ContainerID, nil
+	return containerID, nil
 }
 
 // IsContainerRunning checks if a container is running

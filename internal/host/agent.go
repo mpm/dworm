@@ -107,19 +107,7 @@ func (a *AgentHandler) handleStream(stream net.Conn) {
 	stream.Write([]byte{1})
 
 	// Proxy data bidirectionally
-	done := make(chan struct{}, 2)
-
-	go func() {
-		io.Copy(agentConn, stream)
-		done <- struct{}{}
-	}()
-
-	go func() {
-		io.Copy(stream, agentConn)
-		done <- struct{}{}
-	}()
-
-	<-done
+	protocol.BiProxy(stream, agentConn)
 }
 
 // Close stops accepting agent streams

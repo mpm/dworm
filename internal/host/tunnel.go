@@ -2,7 +2,6 @@ package host
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -32,7 +31,11 @@ func NewTunnelManager(endpoint *EndpointManager) *TunnelManager {
 func (t *TunnelManager) ForwardPort(port int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.forwardPortLocked(port)
+}
 
+// forwardPortLocked is the internal version that assumes the lock is held
+func (t *TunnelManager) forwardPortLocked(port int) error {
 	// Check if already forwarding
 	if _, exists := t.listeners[port]; exists {
 		return nil
@@ -75,30 +78,29 @@ func (t *TunnelManager) StopForwarding(port int) error {
 // UpdatePorts updates the forwarded ports based on what's listening in the container
 func (t *TunnelManager) UpdatePorts(ports []int) {
 	t.mu.Lock()
-	currentPorts := make(map[int]struct{})
-	for p := range t.listeners {
-		currentPorts[p] = struct{}{}
-	}
-	t.mu.Unlock()
+	defer t.mu.Unlock()
 
-	// Add new ports
-	for _, port := range ports {
-		if _, exists := currentPorts[port]; !exists {
-			if err := t.ForwardPort(port); err != nil {
-				t.logger.Printf("Failed to forward port %d: %v", port, err)
-			}
-		}
-	}
-
-	// Remove old ports
+	// Build set of new ports for quick lookup
 	newPortSet := make(map[int]struct{})
 	for _, p := range ports {
 		newPortSet[p] = struct{}{}
 	}
 
-	for port := range currentPorts {
+	// Remove ports that are no longer listening
+	for port, listener := range t.listeners {
 		if _, exists := newPortSet[port]; !exists {
-			t.StopForwarding(port)
+			listener.Close()
+			delete(t.listeners, port)
+			t.logger.Printf("Stopped forwarding port %d", port)
+		}
+	}
+
+	// Add new ports (using internal method that doesn't acquire lock)
+	for _, port := range ports {
+		if _, exists := t.listeners[port]; !exists {
+			if err := t.forwardPortLocked(port); err != nil {
+				t.logger.Printf("Failed to forward port %d: %v", port, err)
+			}
 		}
 	}
 }
@@ -152,17 +154,5 @@ func (t *TunnelManager) handleConnection(localConn net.Conn, containerPort int) 
 	defer remoteConn.Close()
 
 	// Proxy data bidirectionally
-	done := make(chan struct{}, 2)
-
-	go func() {
-		io.Copy(remoteConn, localConn)
-		done <- struct{}{}
-	}()
-
-	go func() {
-		io.Copy(localConn, remoteConn)
-		done <- struct{}{}
-	}()
-
-	<-done
+	protocol.BiProxy(localConn, remoteConn)
 }

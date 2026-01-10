@@ -111,8 +111,8 @@ func (s *Server) waitForInit() error {
 
 	// Start git credential forwarder if enabled
 	if initMsg.GitCredForward {
-		socketPath := "/tmp/dworm-git-credential.sock"
-		helperPath := "/tmp/dworm-git-credential"
+		socketPath := protocol.GitCredentialSocket
+		helperPath := protocol.GitCredentialHelperPath
 
 		s.gitCredForwarder = NewGitCredForwarder(socketPath, s.mux, s.logger)
 		if err := s.gitCredForwarder.Start(); err != nil {
@@ -220,19 +220,7 @@ func (s *Server) handleTunnelStream(stream net.Conn) {
 	stream.Write([]byte{1}) // 1 = success
 
 	// Proxy data bidirectionally
-	done := make(chan struct{}, 2)
-
-	go func() {
-		io.Copy(localConn, stream)
-		done <- struct{}{}
-	}()
-
-	go func() {
-		io.Copy(stream, localConn)
-		done <- struct{}{}
-	}()
-
-	<-done
+	protocol.BiProxy(stream, localConn)
 }
 
 func (s *Server) handleControlMessages() error {

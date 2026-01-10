@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,7 +109,7 @@ func (e *EndpointManager) RecvControl() (string, []byte, error) {
 }
 
 // OpenTunnelStream opens a new stream for tunneling to a port
-func (e *EndpointManager) OpenTunnelStream(port int) (io.ReadWriteCloser, error) {
+func (e *EndpointManager) OpenTunnelStream(port int) (net.Conn, error) {
 	stream, err := e.mux.OpenStream()
 	if err != nil {
 		return nil, err

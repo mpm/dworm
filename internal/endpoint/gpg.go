@@ -134,19 +134,7 @@ func (g *GPGForwarder) handleConnection(conn net.Conn) {
 	}
 
 	// Proxy data bidirectionally
-	done := make(chan struct{}, 2)
-
-	go func() {
-		io.Copy(stream, conn)
-		done <- struct{}{}
-	}()
-
-	go func() {
-		io.Copy(conn, stream)
-		done <- struct{}{}
-	}()
-
-	<-done
+	protocol.BiProxy(conn, stream)
 }
 
 // Close stops the GPG agent forwarder
@@ -160,9 +148,4 @@ func (g *GPGForwarder) Close() error {
 	}
 	os.Remove(g.socketPath)
 	return nil
-}
-
-// SocketPath returns the path to the GPG agent socket
-func (g *GPGForwarder) SocketPath() string {
-	return g.socketPath
 }

@@ -7,12 +7,10 @@ import (
 
 // Message types
 const (
-	TypeInit          = "init"
-	TypePortUpdate    = "port_update"
-	TypeTunnelRequest = "tunnel_request"
-	TypeTunnelReady   = "tunnel_ready"
-	TypePing          = "ping"
-	TypePong          = "pong"
+	TypeInit       = "init"
+	TypePortUpdate = "port_update"
+	TypePing       = "ping"
+	TypePong       = "pong"
 )
 
 // Stream type markers (first byte of streams opened by endpoint)
@@ -42,19 +40,6 @@ type InitMessage struct {
 // PortUpdateMessage is sent from endpoint to host when ports change
 type PortUpdateMessage struct {
 	Ports []int `json:"ports"`
-}
-
-// TunnelRequestMessage is sent from host to endpoint to request a tunnel
-type TunnelRequestMessage struct {
-	StreamID uint32 `json:"stream_id"`
-	Port     int    `json:"port"`
-}
-
-// TunnelReadyMessage is sent from endpoint to host when tunnel is ready
-type TunnelReadyMessage struct {
-	StreamID uint32 `json:"stream_id"`
-	Success  bool   `json:"success"`
-	Error    string `json:"error,omitempty"`
 }
 
 // EncodeMessage wraps a typed message in the envelope format
@@ -97,24 +82,6 @@ func DecodeInit(data json.RawMessage) (*InitMessage, error) {
 // DecodePortUpdate extracts a PortUpdateMessage from raw data
 func DecodePortUpdate(data json.RawMessage) (*PortUpdateMessage, error) {
 	var msg PortUpdateMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
-		return nil, err
-	}
-	return &msg, nil
-}
-
-// DecodeTunnelRequest extracts a TunnelRequestMessage from raw data
-func DecodeTunnelRequest(data json.RawMessage) (*TunnelRequestMessage, error) {
-	var msg TunnelRequestMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
-		return nil, err
-	}
-	return &msg, nil
-}
-
-// DecodeTunnelReady extracts a TunnelReadyMessage from raw data
-func DecodeTunnelReady(data json.RawMessage) (*TunnelReadyMessage, error) {
-	var msg TunnelReadyMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, err
 	}

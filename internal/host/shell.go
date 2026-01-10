@@ -54,11 +54,3 @@ func ExecShell(containerID string, workDir string, envVars map[string]string) er
 
 	return nil
 }
-
-// ExecCommand executes a command in the container and returns the output
-func ExecCommand(containerID string, command []string) ([]byte, error) {
-	args := append([]string{"exec", containerID}, command...)
-	cmd := exec.Command("docker", args...)
-
-	return cmd.CombinedOutput()
-}

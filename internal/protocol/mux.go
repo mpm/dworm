@@ -101,7 +101,7 @@ func (m *Mux) RecvControl() (string, []byte, error) {
 	}
 
 	length := binary.BigEndian.Uint32(lenBuf)
-	if length > 1024*1024 { // 1MB max message size
+	if length > MaxControlMessageSize {
 		return "", nil, fmt.Errorf("message too large: %d bytes", length)
 	}
 

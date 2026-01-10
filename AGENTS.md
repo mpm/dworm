@@ -15,8 +15,11 @@ cmd/
 
 internal/
 ├── protocol/               # Shared between host and endpoint
-│   ├── messages.go         # JSON message types (Init, PortUpdate, TunnelRequest, TunnelReady)
-│   └── mux.go              # Yamux wrapper for multiplexing over stdin/stdout
+│   ├── messages.go         # JSON message types (Init, PortUpdate)
+│   ├── mux.go              # Yamux wrapper for multiplexing over stdin/stdout
+│   ├── proxy.go            # BiProxy utility for bidirectional data copying
+│   ├── constants.go        # Shared constants (socket paths, limits)
+│   └── writer.go           # CRWriter for terminal output
 ├── host/                   # Host-side only
 │   ├── container.go        # Devcontainer lifecycle (up/down via devcontainer CLI + docker)
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
@@ -38,8 +41,9 @@ internal/
 ### Protocol (`internal/protocol/`)
 
 - **Multiplexing**: Uses `github.com/hashicorp/yamux` over stdin/stdout
-- **Control channel**: Stream 0, length-prefixed JSON messages
+- **Control channel**: Stream 0, length-prefixed JSON messages (max 1MB via `MaxControlMessageSize`)
 - **Tunnel streams**: Stream 1+, raw TCP proxy data
+- **BiProxy utility**: `protocol.BiProxy(conn1, conn2)` handles bidirectional copying with proper shutdown
 
 Message flow:
 1. Host sends `init` with env vars and agent forwarding config
@@ -49,10 +53,14 @@ Message flow:
 
 Agent/credential forwarding (reverse direction, endpoint → host):
 - Stream type markers: `StreamTypeAgent` (0x01) for SSH, `StreamTypeGPG` (0x02) for GPG, `StreamTypeGitCred` (0x03) for git credentials
-- SSH: Endpoint creates socket at `/tmp/dworm-ssh-agent.sock`, sets `SSH_AUTH_SOCK` env var
+- SSH: Endpoint creates socket at `protocol.SSHAgentSocketPath`, sets `SSH_AUTH_SOCK` env var
 - GPG: Endpoint runs `gpgconf --list-dirs agent-socket` to find expected path (e.g., `~/.gnupg/S.gpg-agent`), kills existing agent, creates socket there
-- Git: Endpoint creates socket at `/tmp/dworm-git-credential.sock`, creates helper script at `/tmp/dworm-git-credential`, configures git to use it
+- Git: Endpoint creates socket at `protocol.GitCredentialSocket`, creates helper script at `protocol.GitCredentialHelperPath`, configures git to use it
 - On client connect: endpoint opens yamux stream to host with type marker, host proxies to local agent socket (SSH/GPG) or runs `git credential` command (git)
+
+Shared constants (`internal/protocol/constants.go`):
+- `SSHAgentSocketPath`, `GPGAgentSocketPath`, `GitCredentialSocket`, `GitCredentialHelperPath`
+- `MaxControlMessageSize` (1MB), `MaxGitCredentialInput` (64KB)
 
 ### Host Binary (`cmd/dworm/`)
 
@@ -145,10 +153,12 @@ const (
 
 SSH, GPG, and git credential forwarding are implemented. To add other credential forwarding:
 1. Add stream type constant in `internal/protocol/messages.go` (e.g., `StreamTypeMyAgent byte = 0x04`)
-2. Add fields to `InitMessage` for forwarding config
-3. Create Unix socket listener in endpoint (similar to `gpg.go` for socket-based, or `gitcred.go` for command-based)
-4. Extend `host/agent.go` `handleStream()` switch to handle new stream type
-5. Update `cmd/dworm/main.go` to detect host config, send config in init, set env vars if needed
+2. Add socket path constant in `internal/protocol/constants.go`
+3. Add fields to `InitMessage` for forwarding config
+4. Create Unix socket listener in endpoint (similar to `gpg.go` for socket-based, or `gitcred.go` for command-based)
+5. Use `protocol.BiProxy(conn1, conn2)` for bidirectional data copying
+6. Extend `host/agent.go` `handleStream()` switch to handle new stream type
+7. Update `cmd/dworm/main.go` to detect host config, send config in init, set env vars if needed
 
 **Git credential forwarding architecture** (for reference):
 ```

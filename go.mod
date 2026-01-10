@@ -1,6 +1,6 @@
 module github.com/mpm/dworm
 
-go 1.25.5
+go 1.21
 
 require (
 	github.com/hashicorp/yamux v0.1.2

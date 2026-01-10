@@ -158,7 +158,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Check for SSH agent forwarding
 	hostSSHSocket := os.Getenv("SSH_AUTH_SOCK")
 	sshForward := hostSSHSocket != ""
-	containerSSHSocket := "/tmp/dworm-ssh-agent.sock"
+	containerSSHSocket := protocol.SSHAgentSocketPath
 
 	if !sshForward {
 		logger.Printf("Warning: SSH agent forwarding disabled (SSH_AUTH_SOCK not set)")
@@ -173,7 +173,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Check for GPG agent forwarding
 	hostGPGSocket, gpgErr := getGPGAgentSocket()
 	gpgForward := gpgErr == nil
-	containerGPGSocket := "/tmp/dworm-gpg-agent.sock"
+	containerGPGSocket := protocol.GPGAgentSocketPath
 
 	if !gpgForward {
 		logger.Printf("Warning: GPG agent forwarding disabled (%v)", gpgErr)
