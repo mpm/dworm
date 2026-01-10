@@ -23,14 +23,20 @@ type TunnelManager struct {
 	mu           sync.Mutex
 	logger       *log.Logger
 	portUpdateCh chan<- []PortMapping
+	bindAddr     string
 }
 
 // NewTunnelManager creates a new tunnel manager
-func NewTunnelManager(endpoint *EndpointManager) *TunnelManager {
+// bindAddr specifies the address to bind forwarded ports to (e.g., "127.0.0.1" or "0.0.0.0")
+func NewTunnelManager(endpoint *EndpointManager, bindAddr string) *TunnelManager {
+	if bindAddr == "" {
+		bindAddr = "127.0.0.1"
+	}
 	return &TunnelManager{
 		endpoint:  endpoint,
 		listeners: make(map[int]net.Listener),
 		logger:    log.New(protocol.NewCRWriter(os.Stderr), "[tunnel] ", log.LstdFlags),
+		bindAddr:  bindAddr,
 	}
 }
 
@@ -81,11 +87,11 @@ func (t *TunnelManager) forwardPortLocked(port int) error {
 		return nil
 	}
 
-	// Try to bind to the same port on localhost
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	// Try to bind to the same port on the configured address
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", t.bindAddr, port))
 	if err != nil {
 		// Try a different port if the original is in use
-		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		listener, err = net.Listen("tcp", fmt.Sprintf("%s:0", t.bindAddr))
 		if err != nil {
 			return fmt.Errorf("failed to create listener: %w", err)
 		}

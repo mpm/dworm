@@ -20,6 +20,7 @@ var (
 	envVars    []string
 	daemonMode bool
 	configPath string
+	bindAddr   string
 	crStderr   = protocol.NewCRWriter(os.Stderr)
 	crStdout   = protocol.NewCRWriter(os.Stdout)
 	logger     = log.New(crStderr, "", log.LstdFlags)
@@ -46,6 +47,7 @@ environments.`,
 		RunE:  runUp,
 	}
 	upCmd.Flags().BoolVar(&daemonMode, "daemon", false, "Run in daemon mode (no shell)")
+	upCmd.Flags().StringVar(&bindAddr, "bind", "127.0.0.1", "Address to bind forwarded ports to (e.g., 0.0.0.0 for all interfaces)")
 	rootCmd.AddCommand(upCmd)
 
 	// Down command
@@ -252,7 +254,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create tunnel manager and port update channel
-	tunnels := host.NewTunnelManager(endpoint)
+	tunnels := host.NewTunnelManager(endpoint, bindAddr)
 	portUpdateCh := make(chan []host.PortMapping, 10)
 	tunnels.SetPortUpdateChannel(portUpdateCh)
 
