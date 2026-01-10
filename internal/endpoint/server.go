@@ -14,12 +14,13 @@ import (
 
 // Server is the endpoint server running inside the container
 type Server struct {
-	mux            *protocol.Mux
-	envVars        map[string]string
-	currentPorts   []int
-	logger         *log.Logger
-	agentForwarder *AgentForwarder
-	gpgForwarder   *GPGForwarder
+	mux              *protocol.Mux
+	envVars          map[string]string
+	currentPorts     []int
+	logger           *log.Logger
+	agentForwarder   *AgentForwarder
+	gpgForwarder     *GPGForwarder
+	gitCredForwarder *GitCredForwarder
 }
 
 // NewServer creates a new endpoint server
@@ -96,6 +97,38 @@ func (s *Server) waitForInit() error {
 		s.gpgForwarder = NewGPGForwarder(initMsg.GPGSocketPath, s.mux, s.logger)
 		if err := s.gpgForwarder.Start(); err != nil {
 			s.logger.Printf("Warning: failed to start GPG agent forwarder: %v", err)
+		}
+	}
+
+	// Write git config if provided
+	if initMsg.GitConfigContent != "" {
+		if err := WriteGitConfig(initMsg.GitConfigContent); err != nil {
+			s.logger.Printf("Warning: failed to write git config: %v", err)
+		} else {
+			s.logger.Printf("Git config written to ~/.gitconfig")
+		}
+	}
+
+	// Start git credential forwarder if enabled
+	if initMsg.GitCredForward {
+		socketPath := "/tmp/dworm-git-credential.sock"
+		helperPath := "/tmp/dworm-git-credential"
+
+		s.gitCredForwarder = NewGitCredForwarder(socketPath, s.mux, s.logger)
+		if err := s.gitCredForwarder.Start(); err != nil {
+			s.logger.Printf("Warning: failed to start git credential forwarder: %v", err)
+		} else {
+			// Create the credential helper script
+			if err := CreateCredentialHelper(helperPath); err != nil {
+				s.logger.Printf("Warning: failed to create credential helper script: %v", err)
+			} else {
+				// Configure git to use the helper
+				if err := ConfigureCredentialHelper(helperPath); err != nil {
+					s.logger.Printf("Warning: failed to configure git credential helper: %v", err)
+				} else {
+					s.logger.Printf("Git credential forwarding configured")
+				}
+			}
 		}
 	}
 
@@ -229,6 +262,9 @@ func (s *Server) cleanup() {
 	}
 	if s.gpgForwarder != nil {
 		s.gpgForwarder.Close()
+	}
+	if s.gitCredForwarder != nil {
+		s.gitCredForwarder.Close()
 	}
 	if s.mux != nil {
 		s.mux.Close()

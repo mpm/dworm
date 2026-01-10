@@ -28,7 +28,9 @@ internal/
     ├── portscanner.go      # Scans /proc/net/tcp for listening ports
     ├── env.go              # Environment variable handling
     ├── agent.go            # SSH agent forwarding (Unix socket listener)
-    └── gpg.go              # GPG agent forwarding (Unix socket listener)
+    ├── gpg.go              # GPG agent forwarding (Unix socket listener)
+    ├── gitconfig.go        # Git config file writing and credential helper setup
+    └── gitcred.go          # Git credential forwarding (Unix socket + helper client)
 ```
 
 ## Key Components
@@ -45,11 +47,12 @@ Message flow:
 3. Host opens new yamux stream for each tunnel connection
 4. Stream header: 4-byte port number, 1-byte success response
 
-Agent forwarding (reverse direction, endpoint → host):
-- Stream type markers: `StreamTypeAgent` (0x01) for SSH, `StreamTypeGPG` (0x02) for GPG
+Agent/credential forwarding (reverse direction, endpoint → host):
+- Stream type markers: `StreamTypeAgent` (0x01) for SSH, `StreamTypeGPG` (0x02) for GPG, `StreamTypeGitCred` (0x03) for git credentials
 - SSH: Endpoint creates socket at `/tmp/dworm-ssh-agent.sock`, sets `SSH_AUTH_SOCK` env var
 - GPG: Endpoint runs `gpgconf --list-dirs agent-socket` to find expected path (e.g., `~/.gnupg/S.gpg-agent`), kills existing agent, creates socket there
-- On client connect: endpoint opens yamux stream to host with type marker, host proxies to local agent socket
+- Git: Endpoint creates socket at `/tmp/dworm-git-credential.sock`, creates helper script at `/tmp/dworm-git-credential`, configures git to use it
+- On client connect: endpoint opens yamux stream to host with type marker, host proxies to local agent socket (SSH/GPG) or runs `git credential` command (git)
 
 ### Host Binary (`cmd/dworm/`)
 
@@ -61,11 +64,18 @@ Key flows:
 
 ### Endpoint Binary (`cmd/dworm_endpoint/`)
 
-Single-purpose server that:
+Two modes of operation:
+
+**Server mode** (default):
 1. Accepts yamux session (server mode)
-2. Waits for init message, sets env vars
+2. Waits for init message, sets env vars, writes git config, starts forwarders
 3. Runs port scanner goroutine (2s interval)
 4. Accepts tunnel streams, connects to local ports
+
+**Credential helper mode** (`--credential-helper <action>`):
+- Invoked by the git credential helper script
+- Connects to `/tmp/dworm-git-credential.sock`
+- Forwards credential request to host via the socket
 
 ### Port Scanner (`internal/endpoint/portscanner.go`)
 
@@ -133,12 +143,18 @@ const (
 
 ### Add new credential forwarding
 
-SSH and GPG agent forwarding are implemented. To add other credential forwarding:
-1. Add stream type constant in `internal/protocol/messages.go` (e.g., `StreamTypeMyAgent byte = 0x03`)
+SSH, GPG, and git credential forwarding are implemented. To add other credential forwarding:
+1. Add stream type constant in `internal/protocol/messages.go` (e.g., `StreamTypeMyAgent byte = 0x04`)
 2. Add fields to `InitMessage` for forwarding config
-3. Create Unix socket listener in endpoint (similar to `gpg.go`)
+3. Create Unix socket listener in endpoint (similar to `gpg.go` for socket-based, or `gitcred.go` for command-based)
 4. Extend `host/agent.go` `handleStream()` switch to handle new stream type
-5. Update `cmd/dworm/main.go` to detect host socket, send config in init, set env vars if needed
+5. Update `cmd/dworm/main.go` to detect host config, send config in init, set env vars if needed
+
+**Git credential forwarding architecture** (for reference):
+```
+Container: git → helper script → endpoint binary (--credential-helper) → socket → forwarder → yamux → host
+Host: yamux stream → git credential fill/approve/reject → response
+```
 
 ## Dependencies
 

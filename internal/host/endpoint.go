@@ -85,13 +85,15 @@ func (e *EndpointManager) InjectAndStart(endpointBinaryPath string) error {
 }
 
 // SendInit sends the init message with environment variables and agent forwarding config
-func (e *EndpointManager) SendInit(envVars map[string]string, agentForward bool, agentSocketPath string, gpgForward bool, gpgSocketPath string) error {
+func (e *EndpointManager) SendInit(envVars map[string]string, agentForward bool, agentSocketPath string, gpgForward bool, gpgSocketPath string, gitConfigContent string, gitCredForward bool) error {
 	return e.mux.SendControl(protocol.TypeInit, &protocol.InitMessage{
-		EnvVars:         envVars,
-		AgentForward:    agentForward,
-		AgentSocketPath: agentSocketPath,
-		GPGForward:      gpgForward,
-		GPGSocketPath:   gpgSocketPath,
+		EnvVars:          envVars,
+		AgentForward:     agentForward,
+		AgentSocketPath:  agentSocketPath,
+		GPGForward:       gpgForward,
+		GPGSocketPath:    gpgSocketPath,
+		GitConfigContent: gitConfigContent,
+		GitCredForward:   gitCredForward,
 	})
 }
 

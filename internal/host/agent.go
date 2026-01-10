@@ -1,9 +1,12 @@
 package host
 
 import (
+	"bytes"
+	"encoding/binary"
 	"io"
 	"log"
 	"net"
+	"os/exec"
 	"sync"
 
 	"github.com/mpm/dworm/internal/protocol"
@@ -76,6 +79,9 @@ func (a *AgentHandler) handleStream(stream net.Conn) {
 	case protocol.StreamTypeGPG:
 		socketPath = a.gpgSocketPath
 		agentType = "GPG"
+	case protocol.StreamTypeGitCred:
+		a.handleGitCredential(stream)
+		return
 	default:
 		a.logger.Printf("Unknown stream type: %d", typeBuf[0])
 		stream.Write([]byte{0}) // failure
@@ -121,4 +127,70 @@ func (a *AgentHandler) Close() {
 	a.closeMu.Lock()
 	a.closed = true
 	a.closeMu.Unlock()
+}
+
+// handleGitCredential handles a git credential request from the endpoint
+func (a *AgentHandler) handleGitCredential(stream net.Conn) {
+	// Read action byte (0=get/fill, 1=store/approve, 2=erase/reject)
+	actionBuf := make([]byte, 1)
+	if _, err := io.ReadFull(stream, actionBuf); err != nil {
+		a.logger.Printf("Failed to read git credential action: %v", err)
+		stream.Write([]byte{0}) // failure
+		return
+	}
+
+	var action string
+	switch actionBuf[0] {
+	case 0x00:
+		action = "fill"
+	case 0x01:
+		action = "approve"
+	case 0x02:
+		action = "reject"
+	default:
+		a.logger.Printf("Unknown git credential action: %d", actionBuf[0])
+		stream.Write([]byte{0}) // failure
+		return
+	}
+
+	// Read input length
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+		a.logger.Printf("Failed to read git credential input length: %v", err)
+		stream.Write([]byte{0}) // failure
+		return
+	}
+	inputLen := binary.BigEndian.Uint32(lenBuf)
+
+	// Read input
+	input := make([]byte, inputLen)
+	if inputLen > 0 {
+		if _, err := io.ReadFull(stream, input); err != nil {
+			a.logger.Printf("Failed to read git credential input: %v", err)
+			stream.Write([]byte{0}) // failure
+			return
+		}
+	}
+
+	// Send success acknowledgment
+	stream.Write([]byte{1})
+
+	// Execute git credential on host
+	cmd := exec.Command("git", "credential", action)
+	cmd.Stdin = bytes.NewReader(input)
+	output, err := cmd.Output()
+
+	// Send response length and data
+	respLen := make([]byte, 4)
+	if err != nil {
+		a.logger.Printf("Git credential %s failed: %v", action, err)
+		binary.BigEndian.PutUint32(respLen, 0)
+		stream.Write(respLen)
+	} else {
+		binary.BigEndian.PutUint32(respLen, uint32(len(output)))
+		stream.Write(respLen)
+		if len(output) > 0 {
+			stream.Write(output)
+		}
+	}
 }

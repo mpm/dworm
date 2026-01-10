@@ -17,8 +17,9 @@ const (
 
 // Stream type markers (first byte of streams opened by endpoint)
 const (
-	StreamTypeAgent byte = 0x01 // SSH agent forwarding stream
-	StreamTypeGPG   byte = 0x02 // GPG agent forwarding stream
+	StreamTypeAgent   byte = 0x01 // SSH agent forwarding stream
+	StreamTypeGPG     byte = 0x02 // GPG agent forwarding stream
+	StreamTypeGitCred byte = 0x03 // Git credential forwarding stream
 )
 
 // Message is the base envelope for all protocol messages
@@ -29,11 +30,13 @@ type Message struct {
 
 // InitMessage is sent from host to endpoint at startup
 type InitMessage struct {
-	EnvVars         map[string]string `json:"env_vars"`
-	AgentForward    bool              `json:"agent_forward"`               // Whether to enable SSH agent forwarding
-	AgentSocketPath string            `json:"agent_socket_path,omitempty"` // Path for agent socket in container
-	GPGForward      bool              `json:"gpg_forward"`                 // Whether to enable GPG agent forwarding
-	GPGSocketPath   string            `json:"gpg_socket_path,omitempty"`   // Path for GPG agent socket in container
+	EnvVars          map[string]string `json:"env_vars"`
+	AgentForward     bool              `json:"agent_forward"`                // Whether to enable SSH agent forwarding
+	AgentSocketPath  string            `json:"agent_socket_path,omitempty"`  // Path for agent socket in container
+	GPGForward       bool              `json:"gpg_forward"`                  // Whether to enable GPG agent forwarding
+	GPGSocketPath    string            `json:"gpg_socket_path,omitempty"`    // Path for GPG agent socket in container
+	GitConfigContent string            `json:"git_config_content,omitempty"` // Content of host's ~/.gitconfig
+	GitCredForward   bool              `json:"git_cred_forward"`             // Whether to enable git credential forwarding
 }
 
 // PortUpdateMessage is sent from endpoint to host when ports change

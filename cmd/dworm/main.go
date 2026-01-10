@@ -179,9 +179,30 @@ func runUp(cmd *cobra.Command, args []string) error {
 		logger.Printf("Warning: GPG agent forwarding disabled (%v)", gpgErr)
 	}
 
+	// Read host's git config
+	gitConfig := ""
+	homeDir, homeErr := os.UserHomeDir()
+	if homeErr == nil {
+		gitConfigPath := filepath.Join(homeDir, ".gitconfig")
+		if content, err := os.ReadFile(gitConfigPath); err == nil {
+			gitConfig = string(content)
+			logger.Printf("Read host git config (%d bytes)", len(content))
+		} else {
+			logger.Printf("Warning: could not read host git config: %v", err)
+		}
+	}
+
+	// Check for git credential forwarding (enabled if git is available on host)
+	gitCredForward := false
+	if _, err := exec.LookPath("git"); err == nil {
+		gitCredForward = true
+	} else {
+		logger.Printf("Warning: git credential forwarding disabled (git not found on host)")
+	}
+
 	// Send init message
 	envs := parseEnvVars()
-	if err := endpoint.SendInit(envs, sshForward, containerSSHSocket, gpgForward, containerGPGSocket); err != nil {
+	if err := endpoint.SendInit(envs, sshForward, containerSSHSocket, gpgForward, containerGPGSocket, gitConfig, gitCredForward); err != nil {
 		endpoint.Close()
 		return fmt.Errorf("failed to send init: %w", err)
 	}
@@ -198,11 +219,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// so no environment variable is needed - GPG will find it automatically
 	}
 
+	if gitCredForward {
+		logger.Printf("Git credential forwarding enabled")
+	}
+
 	logger.Printf("Endpoint initialized with %d env vars", len(envs))
 
 	// Start agent handler if any forwarding is enabled
 	var agentHandler *host.AgentHandler
-	if sshForward || gpgForward {
+	if sshForward || gpgForward || gitCredForward {
 		agentHandler = host.NewAgentHandler(endpoint.GetMux(), hostSSHSocket, logger)
 		if gpgForward {
 			agentHandler.SetGPGSocketPath(hostGPGSocket)
