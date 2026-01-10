@@ -10,12 +10,19 @@ import (
 	"github.com/mpm/dworm/internal/protocol"
 )
 
+// PortMapping represents a port forwarding from container to host
+type PortMapping struct {
+	ContainerPort int
+	LocalPort     int
+}
+
 // TunnelManager manages port forwarding from container to host
 type TunnelManager struct {
-	endpoint  *EndpointManager
-	listeners map[int]net.Listener
-	mu        sync.Mutex
-	logger    *log.Logger
+	endpoint     *EndpointManager
+	listeners    map[int]net.Listener
+	mu           sync.Mutex
+	logger       *log.Logger
+	portUpdateCh chan<- []PortMapping
 }
 
 // NewTunnelManager creates a new tunnel manager
@@ -27,11 +34,44 @@ func NewTunnelManager(endpoint *EndpointManager) *TunnelManager {
 	}
 }
 
+// SetPortUpdateChannel sets the channel for port update notifications
+func (t *TunnelManager) SetPortUpdateChannel(ch chan<- []PortMapping) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.portUpdateCh = ch
+}
+
+// notifyPortChange sends current port mappings to the update channel
+func (t *TunnelManager) notifyPortChange() {
+	if t.portUpdateCh == nil {
+		return
+	}
+
+	mappings := make([]PortMapping, 0, len(t.listeners))
+	for containerPort, listener := range t.listeners {
+		localPort := listener.Addr().(*net.TCPAddr).Port
+		mappings = append(mappings, PortMapping{
+			ContainerPort: containerPort,
+			LocalPort:     localPort,
+		})
+	}
+
+	// Non-blocking send
+	select {
+	case t.portUpdateCh <- mappings:
+	default:
+	}
+}
+
 // ForwardPort starts forwarding a port from the container to the host
 func (t *TunnelManager) ForwardPort(port int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.forwardPortLocked(port)
+	err := t.forwardPortLocked(port)
+	if err == nil {
+		t.notifyPortChange()
+	}
+	return err
 }
 
 // forwardPortLocked is the internal version that assumes the lock is held
@@ -103,6 +143,9 @@ func (t *TunnelManager) UpdatePorts(ports []int) {
 			}
 		}
 	}
+
+	// Notify about the port change
+	t.notifyPortChange()
 }
 
 // GetForwardedPorts returns a map of container port -> local port

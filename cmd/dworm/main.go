@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/mpm/dworm/internal/host"
+	"github.com/mpm/dworm/internal/host/tui"
 	"github.com/mpm/dworm/internal/protocol"
 	"github.com/spf13/cobra"
 )
@@ -250,8 +251,28 @@ func runUp(cmd *cobra.Command, args []string) error {
 		agentHandler.Start()
 	}
 
-	// Create tunnel manager
+	// Create tunnel manager and port update channel
 	tunnels := host.NewTunnelManager(endpoint)
+	portUpdateCh := make(chan []host.PortMapping, 10)
+	tunnels.SetPortUpdateChannel(portUpdateCh)
+
+	// Convert port updates to TUI format
+	tuiPortUpdateCh := make(chan []tui.PortMapping, 10)
+	go func() {
+		for ports := range portUpdateCh {
+			tuiPorts := make([]tui.PortMapping, len(ports))
+			for i, p := range ports {
+				tuiPorts[i] = tui.PortMapping{
+					ContainerPort: p.ContainerPort,
+					LocalPort:     p.LocalPort,
+				}
+			}
+			select {
+			case tuiPortUpdateCh <- tuiPorts:
+			default:
+			}
+		}
+	}()
 
 	// Handle shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -273,14 +294,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 					logger.Printf("Failed to decode port update: %v", err)
 					continue
 				}
-				logger.Printf("Port update: %v", portMsg.Ports)
 				tunnels.UpdatePorts(portMsg.Ports)
-
-				// Print forwarded ports
-				forwarded := tunnels.GetForwardedPorts()
-				for containerPort, localPort := range forwarded {
-					fmt.Fprintf(crStdout, "Forwarding localhost:%d -> container:%d\n", localPort, containerPort)
-				}
 			}
 		}
 	}()
@@ -290,21 +304,18 @@ func runUp(cmd *cobra.Command, args []string) error {
 		<-sigCh
 		logger.Printf("Shutting down...")
 	} else {
-		// Give some time for initial port scan
-		// Then open shell
-		logger.Printf("Opening shell...")
+		// Start interactive shell with TUI
+		session := tui.NewShellSession(
+			containerInfo.ContainerID,
+			containerInfo.ContainerName,
+			containerInfo.WorkspaceDir,
+			envs,
+			tuiPortUpdateCh,
+		)
 
-		// Run shell in a goroutine so we can handle signals
-		shellDone := make(chan error, 1)
-		go func() {
-			shellDone <- host.ExecShell(containerInfo.ContainerID, containerInfo.WorkspaceDir, envs)
-		}()
-
-		select {
-		case <-sigCh:
-			logger.Printf("Interrupted, closing...")
-		case err := <-shellDone:
-			if err != nil {
+		if err := session.Run(); err != nil {
+			// Check if it's just an exit code
+			if !strings.HasPrefix(err.Error(), "exit ") {
 				logger.Printf("Shell error: %v", err)
 			}
 		}
