@@ -1,8 +1,8 @@
 #!/bin/bash
 # Common utilities for E2E tests
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$_COMMON_DIR/../../.." && pwd)"
 DWORM="$PROJECT_ROOT/bin/dworm"
 DEVCONTAINER_PATH="$PROJECT_ROOT"
 TEST_TIMEOUT=60
