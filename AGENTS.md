@@ -160,8 +160,8 @@ Conditional tests use exit code 77 to skip (autotools convention).
 ### Manual Testing
 
 ```bash
-# Start test devcontainer
-dworm up . --daemon
+# Start test devcontainer (run from project root)
+dworm up --daemon
 
 # In another terminal, start a server in container
 docker exec <container> python3 -m http.server 8080

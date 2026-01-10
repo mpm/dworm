@@ -15,9 +15,14 @@ type ContainerInfo struct {
 	WorkspaceDir  string
 }
 
-// DevcontainerUp starts a devcontainer and returns container info
-func DevcontainerUp(workspacePath string) (*ContainerInfo, error) {
-	cmd := exec.Command("devcontainer", "up", "--workspace-folder", workspacePath)
+// DevcontainerUp starts a devcontainer and returns container info.
+// If configPath is non-empty, it is passed to devcontainer CLI as --config.
+func DevcontainerUp(workspacePath, configPath string) (*ContainerInfo, error) {
+	args := []string{"up", "--workspace-folder", workspacePath}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+	cmd := exec.Command("devcontainer", args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

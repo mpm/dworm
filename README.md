@@ -38,33 +38,38 @@ make build
 
 ```bash
 # Start container and open shell (default)
-dworm up .
+# Run from a directory containing .devcontainer/devcontainer.json
+dworm up
 
 # Start in daemon mode (no shell, stays in foreground)
-dworm up . --daemon
+dworm up --daemon
 
 # With environment variables
-dworm up . --env API_KEY=secret --env DEBUG=true
+dworm up --env API_KEY=secret --env DEBUG=true
+
+# Use a different devcontainer.json
+dworm up --config /path/to/devcontainer.json
+dworm up -c .devcontainer/custom.json
 ```
 
 ### Other commands
 
 ```bash
 # Stop the container
-dworm down .
+dworm down
 
 # Open a shell in a running container
-dworm shell .
+dworm shell
 
 # Check container status
-dworm status .
+dworm status
 ```
 
 ### Example workflow
 
 ```bash
-# Terminal 1: Start dworm
-$ dworm up . --daemon
+# Terminal 1: Start dworm from your project directory
+$ dworm up --daemon
 2024/01/09 22:39:03 Container started: myproject-dev
 2024/01/09 22:39:03 SSH agent forwarding enabled
 Forwarding localhost:3000 -> container:3000
@@ -75,7 +80,7 @@ $ curl http://localhost:3000
 Hello from container!
 
 # Terminal 3: Work in the container
-$ dworm shell .
+$ dworm shell
 developer@container:~$ npm run dev
 ```
 
@@ -89,7 +94,7 @@ $ ssh-add -l
 256 SHA256:... user@host (ED25519)
 
 # Start dworm (agent forwarding is automatic)
-$ dworm up .
+$ dworm up
 
 # Inside the container, your keys are available
 developer@container:~$ ssh-add -l
@@ -112,7 +117,7 @@ sec   ed25519 2024-01-01 [SC]
       ABC123...
 
 # Start dworm (GPG forwarding is automatic)
-$ dworm up .
+$ dworm up
 
 # Inside the container, sign commits with your host key
 developer@container:~$ git commit -S -m "Signed commit"
@@ -125,7 +130,7 @@ Your host's `~/.gitconfig` is automatically copied to the container, so `user.na
 Git credential forwarding proxies credential requests to the host, allowing you to push/pull from private repositories:
 
 ```bash
-$ dworm up .
+$ dworm up
 
 # Inside the container
 developer@container:~$ git push origin main

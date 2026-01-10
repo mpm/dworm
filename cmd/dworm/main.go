@@ -18,6 +18,7 @@ import (
 var (
 	envVars    []string
 	daemonMode bool
+	configPath string
 	crStderr   = protocol.NewCRWriter(os.Stderr)
 	crStdout   = protocol.NewCRWriter(os.Stdout)
 	logger     = log.New(crStderr, "", log.LstdFlags)
@@ -34,12 +35,13 @@ environments.`,
 
 	// Global flags
 	rootCmd.PersistentFlags().StringArrayVarP(&envVars, "env", "e", nil, "Environment variables to inject (KEY=VALUE)")
+	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "Path to devcontainer.json or .devcontainer directory")
 
 	// Up command
 	upCmd := &cobra.Command{
-		Use:   "up [path]",
+		Use:   "up",
 		Short: "Start container, inject endpoint, establish tunnel",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.NoArgs,
 		RunE:  runUp,
 	}
 	upCmd.Flags().BoolVar(&daemonMode, "daemon", false, "Run in daemon mode (no shell)")
@@ -47,27 +49,27 @@ environments.`,
 
 	// Down command
 	downCmd := &cobra.Command{
-		Use:   "down [path]",
+		Use:   "down",
 		Short: "Stop the devcontainer",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.NoArgs,
 		RunE:  runDown,
 	}
 	rootCmd.AddCommand(downCmd)
 
 	// Shell command
 	shellCmd := &cobra.Command{
-		Use:   "shell [path]",
+		Use:   "shell",
 		Short: "Open a shell in the container",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.NoArgs,
 		RunE:  runShell,
 	}
 	rootCmd.AddCommand(shellCmd)
 
 	// Status command
 	statusCmd := &cobra.Command{
-		Use:   "status [path]",
+		Use:   "status",
 		Short: "Show forwarded ports and active configuration",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.NoArgs,
 		RunE:  runStatus,
 	}
 	rootCmd.AddCommand(statusCmd)
@@ -77,15 +79,23 @@ environments.`,
 	}
 }
 
-func getWorkspacePath(args []string) (string, error) {
-	path := "."
-	if len(args) > 0 {
-		path = args[0]
-	}
-
-	absPath, err := filepath.Abs(path)
+func getWorkspacePath() (string, error) {
+	absPath, err := filepath.Abs(".")
 	if err != nil {
 		return "", fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	return absPath, nil
+}
+
+func getConfigPath() (string, error) {
+	if configPath == "" {
+		return "", nil
+	}
+
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute config path: %w", err)
 	}
 
 	return absPath, nil
@@ -126,7 +136,12 @@ func getGPGAgentSocket() (string, error) {
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
-	workspacePath, err := getWorkspacePath(args)
+	workspacePath, err := getWorkspacePath()
+	if err != nil {
+		return err
+	}
+
+	cfgPath, err := getConfigPath()
 	if err != nil {
 		return err
 	}
@@ -134,7 +149,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	logger.Printf("Starting devcontainer at %s...", workspacePath)
 
 	// Start container
-	containerInfo, err := host.DevcontainerUp(workspacePath)
+	containerInfo, err := host.DevcontainerUp(workspacePath, cfgPath)
 	if err != nil {
 		return fmt.Errorf("failed to start devcontainer: %w", err)
 	}
@@ -305,7 +320,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 }
 
 func runDown(cmd *cobra.Command, args []string) error {
-	workspacePath, err := getWorkspacePath(args)
+	workspacePath, err := getWorkspacePath()
 	if err != nil {
 		return err
 	}
@@ -321,7 +336,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 }
 
 func runShell(cmd *cobra.Command, args []string) error {
-	workspacePath, err := getWorkspacePath(args)
+	workspacePath, err := getWorkspacePath()
 	if err != nil {
 		return err
 	}
@@ -336,7 +351,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	workspacePath, err := getWorkspacePath(args)
+	workspacePath, err := getWorkspacePath()
 	if err != nil {
 		return err
 	}

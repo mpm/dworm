@@ -40,7 +40,7 @@ start_dworm() {
     local extra_args="${1:-}"
     log_info "Starting dworm..."
     # shellcheck disable=SC2086
-    "$DWORM" up "$DEVCONTAINER_PATH" --daemon $extra_args &
+    (cd "$DEVCONTAINER_PATH" && "$DWORM" up --daemon $extra_args) &
     DWORM_PID=$!
 
     # Wait for container to be ready
@@ -61,7 +61,7 @@ stop_dworm() {
         kill "$DWORM_PID" 2>/dev/null || true
         wait "$DWORM_PID" 2>/dev/null || true
     fi
-    "$DWORM" down "$DEVCONTAINER_PATH" 2>/dev/null || true
+    (cd "$DEVCONTAINER_PATH" && "$DWORM" down) 2>/dev/null || true
 }
 
 # Cleanup on exit
