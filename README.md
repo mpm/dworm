@@ -165,6 +165,32 @@ dworm uses standard devcontainer configuration. Create a `.devcontainer/devconta
 }
 ```
 
+## Testing
+
+### Unit tests
+
+Unit tests run entirely in-memory using a test harness that connects the host and endpoint code over `io.Pipe()`. No Docker required.
+
+```bash
+make test-unit     # Run all unit tests
+make test-race     # Run with Go's race detector
+make test-cover    # Generate HTML coverage report
+```
+
+### End-to-end tests
+
+E2E tests use a real devcontainer to verify port forwarding, agent forwarding, and credential forwarding work correctly. They require Docker and will skip gracefully if Docker is unavailable.
+
+```bash
+make test-e2e      # Run E2E tests
+make test          # Run both unit and E2E tests
+```
+
+Some E2E tests are conditional:
+- **SSH agent test**: Skips if `SSH_AUTH_SOCK` is not set
+- **GPG agent test**: Skips if gpg-agent is not running or has no keys
+- **Git credential test**: Skips if no credential helper is configured
+
 ## Limitations
 
 - No automatic reconnection on disconnect

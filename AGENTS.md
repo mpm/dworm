@@ -13,13 +13,20 @@ cmd/
 ├── dworm/main.go           # Host-side CLI entry point (Cobra)
 └── dworm_endpoint/main.go  # Container-side binary entry point
 
+test/e2e/                   # E2E test scripts (require Docker)
+├── run-e2e.sh              # Main test runner
+├── lib/common.sh           # Shared test utilities
+├── lib/skip.sh             # Skip condition helpers
+└── test-*.sh               # Individual test scripts
+
 internal/
 ├── protocol/               # Shared between host and endpoint
 │   ├── messages.go         # JSON message types (Init, PortUpdate)
 │   ├── mux.go              # Yamux wrapper for multiplexing over stdin/stdout
 │   ├── proxy.go            # BiProxy utility for bidirectional data copying
 │   ├── constants.go        # Shared constants (socket paths, limits)
-│   └── writer.go           # CRWriter for terminal output
+│   ├── writer.go           # CRWriter for terminal output
+│   └── testutil/harness.go # Test harness for in-process testing
 ├── host/                   # Host-side only
 │   ├── container.go        # Devcontainer lifecycle (up/down via devcontainer CLI + docker)
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
@@ -112,6 +119,45 @@ make tidy           # Update go.mod
 Endpoint is always built for `GOOS=linux GOARCH=amd64` since it runs in containers.
 
 ## Testing
+
+### Unit Tests
+
+```bash
+make test-unit     # Run all unit tests (no Docker required)
+make test-race     # Run with race detector
+make test-cover    # Generate coverage report (coverage.html)
+```
+
+Test files:
+- `internal/protocol/mux_test.go` - Yamux multiplexing, control messages, streams
+- `internal/protocol/messages_test.go` - Message encoding/decoding
+- `internal/endpoint/portscanner_test.go` - /proc/net/tcp parsing, port diff logic
+- `internal/host/agent_test.go` - SSH/GPG/git credential stream routing
+
+**Test harness** (`internal/protocol/testutil/harness.go`):
+- Connects host and endpoint muxes over `io.Pipe()` for in-process testing
+- No Docker required - uses real yamux over memory pipes
+- Usage: `h, _ := testutil.NewTestHarness(); defer h.Close()`
+- Access muxes via `h.HostMux` and `h.EndpointMux`
+
+### E2E Tests
+
+```bash
+make test-e2e      # Run E2E tests (requires Docker, skips gracefully if unavailable)
+make test          # Run all tests (unit + e2e)
+```
+
+E2E scripts in `test/e2e/`:
+- `run-e2e.sh` - Main runner with Docker auto-detection
+- `test-port-forward.sh` - Port forwarding test
+- `test-env-vars.sh` - Environment variable forwarding
+- `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
+- `test-gpg-agent.sh` - GPG agent forwarding (conditional)
+- `test-git-creds.sh` - Git credential forwarding (conditional)
+
+Conditional tests use exit code 77 to skip (autotools convention).
+
+### Manual Testing
 
 ```bash
 # Start test devcontainer
