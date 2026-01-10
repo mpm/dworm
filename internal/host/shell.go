@@ -9,7 +9,7 @@ import (
 )
 
 // ExecShell opens an interactive shell in the container
-func ExecShell(containerID string, workDir string) error {
+func ExecShell(containerID string, workDir string, envVars map[string]string) error {
 	// Determine shell to use
 	shell := "/bin/bash"
 
@@ -17,6 +17,11 @@ func ExecShell(containerID string, workDir string) error {
 
 	if workDir != "" {
 		args = append(args, "-w", workDir)
+	}
+
+	// Add environment variables
+	for key, value := range envVars {
+		args = append(args, "-e", key+"="+value)
 	}
 
 	args = append(args, containerID, shell)

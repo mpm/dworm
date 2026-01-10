@@ -192,7 +192,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// Run shell in a goroutine so we can handle signals
 		shellDone := make(chan error, 1)
 		go func() {
-			shellDone <- host.ExecShell(containerInfo.ContainerID, containerInfo.WorkspaceDir)
+			shellDone <- host.ExecShell(containerInfo.ContainerID, containerInfo.WorkspaceDir, envs)
 		}()
 
 		select {
@@ -239,7 +239,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get container ID: %w", err)
 	}
 
-	return host.ExecShell(containerID, "")
+	return host.ExecShell(containerID, "", parseEnvVars())
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
