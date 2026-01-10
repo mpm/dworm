@@ -24,7 +24,7 @@ type EndpointManager struct {
 func NewEndpointManager(containerID string) *EndpointManager {
 	return &EndpointManager{
 		containerID: containerID,
-		logger:      log.New(os.Stderr, "[host] ", log.LstdFlags),
+		logger:      log.New(protocol.NewCRWriter(os.Stderr), "[host] ", log.LstdFlags),
 	}
 }
 

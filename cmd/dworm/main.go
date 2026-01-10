@@ -17,7 +17,9 @@ import (
 var (
 	envVars    []string
 	daemonMode bool
-	logger     = log.New(os.Stderr, "", log.LstdFlags)
+	crStderr   = protocol.NewCRWriter(os.Stderr)
+	crStdout   = protocol.NewCRWriter(os.Stdout)
+	logger     = log.New(crStderr, "", log.LstdFlags)
 )
 
 func main() {
@@ -172,7 +174,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 				// Print forwarded ports
 				forwarded := tunnels.GetForwardedPorts()
 				for containerPort, localPort := range forwarded {
-					fmt.Printf("Forwarding localhost:%d -> container:%d\n", localPort, containerPort)
+					fmt.Fprintf(crStdout, "Forwarding localhost:%d -> container:%d\n", localPort, containerPort)
 				}
 			}
 		}
@@ -253,12 +255,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	if !host.IsContainerRunning(containerID) {
-		fmt.Printf("Container %s is not running\n", containerID[:12])
+		fmt.Fprintf(crStdout, "Container %s is not running\n", containerID[:12])
 		return nil
 	}
 
-	fmt.Printf("Container: %s\n", containerID[:12])
-	fmt.Printf("Status: running\n")
+	fmt.Fprintf(crStdout, "Container: %s\n", containerID[:12])
+	fmt.Fprintf(crStdout, "Status: running\n")
 
 	return nil
 }

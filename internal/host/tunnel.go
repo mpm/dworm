@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"sync"
+
+	"github.com/mpm/dworm/internal/protocol"
 )
 
 // TunnelManager manages port forwarding from container to host
@@ -22,7 +24,7 @@ func NewTunnelManager(endpoint *EndpointManager) *TunnelManager {
 	return &TunnelManager{
 		endpoint:  endpoint,
 		listeners: make(map[int]net.Listener),
-		logger:    log.New(os.Stderr, "[tunnel] ", log.LstdFlags),
+		logger:    log.New(protocol.NewCRWriter(os.Stderr), "[tunnel] ", log.LstdFlags),
 	}
 }
 
