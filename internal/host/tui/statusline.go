@@ -277,6 +277,51 @@ func (s *StatusLine) Clear() {
 	})
 }
 
+// ClearAndGetDimensions clears the status line and returns the current dimensions.
+// This is used to clear at the old position before updating dimensions.
+func (s *StatusLine) ClearAndGetDimensions() (width, height, statusHeight int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	statusHeight = s.heightLocked()
+	width = s.termWidth
+	height = s.termHeight
+	startRow := s.termHeight - statusHeight + 1
+
+	// Use atomic write to prevent interleaving
+	s.out.Atomic(func(w io.Writer) {
+		for row := startRow; row <= s.termHeight; row++ {
+			clearRowTo(w, row, "")
+		}
+	})
+
+	return width, height, statusHeight
+}
+
+// ClearMaxArea clears the maximum possible status area (used before expand/collapse toggle).
+// This ensures artifacts are removed even when the height is about to change.
+func (s *StatusLine) ClearMaxArea() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Clear from minimum possible status start to bottom
+	// Maximum expanded height is termHeight/2, so clear from there
+	maxHeight := s.termHeight / 2
+	if maxHeight < 5 {
+		maxHeight = 5
+	}
+	startRow := s.termHeight - maxHeight + 1
+	if startRow < 1 {
+		startRow = 1
+	}
+
+	s.out.Atomic(func(w io.Writer) {
+		for row := startRow; row <= s.termHeight; row++ {
+			clearRowTo(w, row, "")
+		}
+	})
+}
+
 // clearRowTo clears an entire row and optionally writes text (internal helper)
 func clearRowTo(w io.Writer, row int, text string) {
 	fmt.Fprint(w, SaveCursor)

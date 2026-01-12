@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,14 @@ import (
 
 	"golang.org/x/term"
 )
+
+// Common clear screen sequences that we need to detect
+var clearSequences = [][]byte{
+	[]byte("\x1b[2J"),  // Clear entire screen
+	[]byte("\x1b[3J"),  // Clear entire screen including scrollback
+	[]byte("\x1bc"),    // Full terminal reset
+	[]byte("\x1b[H"),   // Cursor home (often used with 2J)
+}
 
 const (
 	ctrlG = 0x07 // Ctrl+G key code
@@ -87,8 +96,21 @@ func (s *ShellSession) Run() error {
 	s.termWriter.WriteString(SetScrollRegion(1, shellHeight))
 	defer s.termWriter.WriteString(ResetScrollRegion)
 
-	// Move cursor to top-left of scroll region
-	s.termWriter.WriteString(MoveTo(1, 1))
+	// Clear the entire visible area to remove pre-existing terminal content
+	s.termWriter.Atomic(func(w io.Writer) {
+		// Clear all rows within the scroll region
+		for row := 1; row <= shellHeight; row++ {
+			fmt.Fprint(w, MoveToRow(row))
+			fmt.Fprint(w, ClearLine)
+		}
+		// Also clear the status area
+		for row := shellHeight + 1; row <= height; row++ {
+			fmt.Fprint(w, MoveToRow(row))
+			fmt.Fprint(w, ClearLine)
+		}
+		// Move cursor to top-left
+		fmt.Fprint(w, MoveTo(1, 1))
+	})
 
 	// Initial status line render
 	s.statusLine.Render()
@@ -168,10 +190,27 @@ func (s *ShellSession) copyOutput() {
 			return
 		}
 		if n > 0 {
+			data := buf[:n]
 			// Use synchronized writer to prevent interleaving with status line
-			s.termWriter.Write(buf[:n])
+			s.termWriter.Write(data)
+
+			// Check if output contains a clear screen sequence
+			// If so, re-render the status line since it was likely cleared
+			if s.containsClearSequence(data) {
+				s.statusLine.Render()
+			}
 		}
 	}
+}
+
+// containsClearSequence checks if the data contains any clear screen sequences
+func (s *ShellSession) containsClearSequence(data []byte) bool {
+	for _, seq := range clearSequences {
+		if bytes.Contains(data, seq) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ShellSession) handleInput() {
@@ -195,6 +234,8 @@ func (s *ShellSession) handleInput() {
 
 		// Check if panel is expanded - any key closes it
 		if s.statusLine.IsExpanded() {
+			// Clear the max area BEFORE changing state to remove expanded panel artifacts
+			s.statusLine.ClearMaxArea()
 			s.statusLine.SetExpanded(false)
 			s.resizeAndRender()
 			continue
@@ -202,6 +243,8 @@ func (s *ShellSession) handleInput() {
 
 		// Check for Ctrl+G
 		if b == ctrlG {
+			// Clear the max area BEFORE changing state to prepare for expansion/collapse
+			s.statusLine.ClearMaxArea()
 			s.statusLine.ToggleExpanded()
 			s.resizeAndRender()
 			continue
@@ -240,21 +283,34 @@ func (s *ShellSession) handleEvents(sigCh chan os.Signal) {
 }
 
 func (s *ShellSession) handleResize() {
+	// Clear status line at OLD position and get old dimensions
+	// This must happen BEFORE we get new dimensions
+	s.statusLine.ClearAndGetDimensions()
+
+	// Now get the NEW terminal size
 	width, height, err := GetTerminalSize(int(os.Stdout.Fd()))
 	if err != nil {
 		return
 	}
 
+	// Update status line with new dimensions
 	s.statusLine.SetTerminalSize(width, height)
 	shellHeight := height - s.statusLine.Height()
 
-	// Update scroll region (use synchronized writer)
-	s.termWriter.WriteString(SetScrollRegion(1, shellHeight))
+	// Update scroll region and clear any content in the new status area
+	s.termWriter.Atomic(func(w io.Writer) {
+		fmt.Fprint(w, SetScrollRegion(1, shellHeight))
+		// Clear the new status area to remove any wrapped content
+		for row := shellHeight + 1; row <= height; row++ {
+			fmt.Fprint(w, MoveToRow(row))
+			fmt.Fprint(w, ClearLine)
+		}
+	})
 
 	// Resize PTY
 	ResizePTY(s.ptmx, shellHeight, width)
 
-	// Re-render status line
+	// Re-render status line at NEW position
 	s.statusLine.Render()
 }
 
