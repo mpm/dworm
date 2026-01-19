@@ -21,8 +21,27 @@ A CLI tool that bridges your host machine and devcontainer environments, providi
 
 ## Installation
 
+### Quick install
+
 ```bash
-# Clone and build
+curl -fsSL https://raw.githubusercontent.com/mpm/dworm/main/install.sh | sh
+```
+
+This installs to `~/.local/bin`. To install elsewhere:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mpm/dworm/main/install.sh | DWORM_INSTALL_DIR=/usr/local/bin sh
+```
+
+To install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mpm/dworm/main/install.sh | sh -s v0.1.0
+```
+
+### Build from source
+
+```bash
 git clone https://github.com/mpm/dworm.git
 cd dworm
 make build
