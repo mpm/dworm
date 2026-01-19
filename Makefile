@@ -2,10 +2,20 @@
 
 GO := /home/malte/.local/share/mise/installs/go/1.25.5/bin/go
 
+# Version info - auto-detected from git
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# ldflags for version injection
+LDFLAGS := -X github.com/mpm/dworm/internal/version.Version=$(VERSION) \
+           -X github.com/mpm/dworm/internal/version.Commit=$(COMMIT) \
+           -X github.com/mpm/dworm/internal/version.Date=$(DATE)
+
 build: build-host build-endpoint
 
 build-host:
-	$(GO) build -o bin/dworm ./cmd/dworm
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/dworm ./cmd/dworm
 
 build-endpoint:
 	GOOS=linux GOARCH=amd64 $(GO) build -o bin/dworm_endpoint ./cmd/dworm_endpoint

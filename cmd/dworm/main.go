@@ -13,6 +13,7 @@ import (
 	"github.com/mpm/dworm/internal/host"
 	"github.com/mpm/dworm/internal/host/tui"
 	"github.com/mpm/dworm/internal/protocol"
+	"github.com/mpm/dworm/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -28,12 +29,16 @@ var (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "dworm",
-		Short: "Development Wormhole - seamless devcontainer bridging",
+		Use:     "dworm",
+		Short:   "Development Wormhole - seamless devcontainer bridging",
+		Version: version.Short(),
 		Long: `dworm wraps the devcontainer CLI to provide seamless development
 environment bridging between your host machine and containerized development
 environments.`,
 	}
+
+	// Customize version template to show full info
+	rootCmd.SetVersionTemplate(version.Info() + "\n")
 
 	// Global flags
 	rootCmd.PersistentFlags().StringArrayVarP(&envVars, "env", "e", nil, "Environment variables to inject (KEY=VALUE)")
@@ -77,7 +82,26 @@ environments.`,
 	}
 	rootCmd.AddCommand(statusCmd)
 
-	if err := rootCmd.Execute(); err != nil {
+	// Start version check in background (non-blocking)
+	updateCh := make(chan *version.CheckResult, 1)
+	go func() {
+		updateCh <- version.CheckForUpdate()
+	}()
+
+	err := rootCmd.Execute()
+
+	// Check for update result (non-blocking)
+	select {
+	case result := <-updateCh:
+		if result != nil && result.UpdateAvailable {
+			fmt.Fprintf(os.Stderr, "\nA new version of dworm is available: %s (current: %s)\n", result.Latest, result.Current)
+			fmt.Fprintf(os.Stderr, "Download: %s\n", result.ReleaseURL)
+		}
+	default:
+		// Check not complete yet, skip
+	}
+
+	if err != nil {
 		os.Exit(1)
 	}
 }

@@ -39,14 +39,17 @@ internal/
 │       ├── termwriter.go   # Terminal output wrapper
 │       ├── ansi.go         # ANSI escape sequence helpers
 │       └── pty.go          # PTY utilities
-└── endpoint/               # Container-side only
-    ├── server.go           # Main server loop, handles control messages
-    ├── portscanner.go      # Scans /proc/net/tcp for listening ports
-    ├── env.go              # Environment variable handling
-    ├── agent.go            # SSH agent forwarding (Unix socket listener)
-    ├── gpg.go              # GPG agent forwarding (Unix socket listener)
-    ├── gitconfig.go        # Git config file writing and credential helper setup
-    └── gitcred.go          # Git credential forwarding (Unix socket + helper client)
+├── endpoint/               # Container-side only
+│   ├── server.go           # Main server loop, handles control messages
+│   ├── portscanner.go      # Scans /proc/net/tcp for listening ports
+│   ├── env.go              # Environment variable handling
+│   ├── agent.go            # SSH agent forwarding (Unix socket listener)
+│   ├── gpg.go              # GPG agent forwarding (Unix socket listener)
+│   ├── gitconfig.go        # Git config file writing and credential helper setup
+│   └── gitcred.go          # Git credential forwarding (Unix socket + helper client)
+└── version/                # Version info and update checking
+    ├── version.go          # Version variables (set via ldflags at build time)
+    └── check.go            # GitHub API version check for update notifications
 ```
 
 ## Key Components
@@ -75,9 +78,21 @@ Shared constants (`internal/protocol/constants.go`):
 - `SSHAgentSocketPath`, `GPGAgentSocketPath`, `GitCredentialSocket`, `GitCredentialHelperPath`
 - `MaxControlMessageSize` (1MB), `MaxGitCredentialInput` (64KB)
 
+### Version (`internal/version/`)
+
+- `Version`, `Commit`, `Date` variables set at build time via ldflags
+- `Info()` returns formatted version string for `--version` flag
+- `CheckForUpdate()` queries GitHub API for latest release (async, 5s timeout)
+- Skips update check for development builds (`Version == "dev"` or empty)
+- Semver comparison in `isNewer()` handles `vX.Y.Z` format
+
 ### Host Binary (`cmd/dworm/`)
 
 Entry point uses Cobra with subcommands: `up`, `down`, `shell`, `status`
+
+CLI flags:
+- `--version` / `-v`: Show version info (handled by Cobra)
+- Async update check runs at startup, prints warning after command completes if newer version exists
 
 Key flows:
 - `up`: DevcontainerUp → InjectAndStart → SendInit → handle port updates → ForwardPort
@@ -131,6 +146,13 @@ make tidy           # Update go.mod
 ```
 
 Endpoint is always built for `GOOS=linux GOARCH=amd64` since it runs in containers.
+
+**Version injection**: The Makefile automatically injects version info via ldflags:
+- `Version`: from `git describe --tags --always --dirty` (e.g., `v1.0.0`, `v1.0.0-5-gabc1234-dirty`, or `dev`)
+- `Commit`: short git commit hash
+- `Date`: build timestamp (UTC ISO 8601)
+
+The GitHub Actions release workflow also injects version from the git tag.
 
 ## Testing
 

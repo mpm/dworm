@@ -36,7 +36,11 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -ldflags="-s -w" -o dworm ./cmd/dworm
+          VERSION=${GITHUB_REF#refs/tags/}
+          COMMIT=$(git rev-parse --short HEAD)
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          LDFLAGS="-s -w -X github.com/mpm/dworm/internal/version.Version=${VERSION} -X github.com/mpm/dworm/internal/version.Commit=${COMMIT} -X github.com/mpm/dworm/internal/version.Date=${DATE}"
+          go build -ldflags="${LDFLAGS}" -o dworm ./cmd/dworm
 
       - name: Build endpoint binary
         run: |
