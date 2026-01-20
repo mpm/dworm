@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/mpm/dworm/internal/protocol"
 )
 
 const (
@@ -16,126 +19,187 @@ const (
 	MaxPort = 20000
 )
 
-// ScanListeningPorts returns a sorted list of ports that are listening
-func ScanListeningPorts() ([]int, error) {
-	ports := make(map[int]struct{})
+// ScanListeningPorts returns a sorted list of ports that are listening with their bind addresses
+func ScanListeningPorts() ([]protocol.PortInfo, error) {
+	// Use a map to track unique (port, address) pairs
+	type portKey struct {
+		port    int
+		address string
+	}
+	seen := make(map[portKey]struct{})
+	var ports []protocol.PortInfo
 
 	// Scan IPv4
-	if err := scanProcNetTCP("/proc/net/tcp", ports); err != nil {
-		// Not fatal - file might not exist
-		_ = err
+	if ipv4Ports, err := scanProcNetTCP("/proc/net/tcp", false); err == nil {
+		for _, p := range ipv4Ports {
+			key := portKey{p.Port, p.Address}
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				ports = append(ports, p)
+			}
+		}
 	}
 
 	// Scan IPv6
-	if err := scanProcNetTCP("/proc/net/tcp6", ports); err != nil {
-		// Not fatal - file might not exist
-		_ = err
+	if ipv6Ports, err := scanProcNetTCP("/proc/net/tcp6", true); err == nil {
+		for _, p := range ipv6Ports {
+			key := portKey{p.Port, p.Address}
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				ports = append(ports, p)
+			}
+		}
 	}
 
-	// Convert to sorted slice
-	result := make([]int, 0, len(ports))
-	for port := range ports {
-		result = append(result, port)
-	}
-	sort.Ints(result)
+	// Sort by port number, then by address
+	sort.Slice(ports, func(i, j int) bool {
+		if ports[i].Port != ports[j].Port {
+			return ports[i].Port < ports[j].Port
+		}
+		return ports[i].Address < ports[j].Address
+	})
 
-	return result, nil
+	return ports, nil
 }
 
 // scanProcNetTCP parses /proc/net/tcp or /proc/net/tcp6
-func scanProcNetTCP(path string, ports map[int]struct{}) error {
+func scanProcNetTCP(path string, isIPv6 bool) ([]protocol.PortInfo, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer file.Close()
 
+	var ports []protocol.PortInfo
 	scanner := bufio.NewScanner(file)
 
 	// Skip header line
 	if !scanner.Scan() {
-		return nil
+		return ports, nil
 	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		port, listening, err := parseProcNetLine(line)
+		port, address, listening, err := parseProcNetLine(line, isIPv6)
 		if err != nil {
 			continue
 		}
 
 		if listening && port >= MinPort && port <= MaxPort {
-			ports[port] = struct{}{}
+			ports = append(ports, protocol.PortInfo{
+				Port:    port,
+				Address: address,
+			})
 		}
 	}
 
-	return scanner.Err()
+	return ports, scanner.Err()
 }
 
-// parseProcNetLine parses a line from /proc/net/tcp
+// parseProcNetLine parses a line from /proc/net/tcp or /proc/net/tcp6
 // Format: sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
 // Example: 0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 ...
-func parseProcNetLine(line string) (port int, listening bool, err error) {
+func parseProcNetLine(line string, isIPv6 bool) (port int, address string, listening bool, err error) {
 	fields := strings.Fields(line)
 	if len(fields) < 4 {
-		return 0, false, fmt.Errorf("invalid line format")
+		return 0, "", false, fmt.Errorf("invalid line format")
 	}
 
 	// Parse local address (field 1)
 	localAddr := fields[1]
 	parts := strings.Split(localAddr, ":")
 	if len(parts) != 2 {
-		return 0, false, fmt.Errorf("invalid local address format")
+		return 0, "", false, fmt.Errorf("invalid local address format")
+	}
+
+	// Parse the IP address from hex
+	addrHex := parts[0]
+	address, err = parseHexAddress(addrHex, isIPv6)
+	if err != nil {
+		return 0, "", false, err
 	}
 
 	// Port is in hex
 	portHex := parts[1]
 	portBytes, err := hex.DecodeString(portHex)
 	if err != nil {
-		return 0, false, err
+		return 0, "", false, err
 	}
 
 	// Convert port bytes to int (big endian in /proc/net/tcp)
 	if len(portBytes) == 2 {
 		port = int(portBytes[0])<<8 | int(portBytes[1])
 	} else {
-		return 0, false, fmt.Errorf("invalid port bytes")
+		return 0, "", false, fmt.Errorf("invalid port bytes")
 	}
 
 	// State is field 3 (hex)
 	// 0A = TCP_LISTEN
 	state, err := strconv.ParseUint(fields[3], 16, 8)
 	if err != nil {
-		return 0, false, err
+		return 0, "", false, err
 	}
 
 	listening = state == 0x0A
 
-	return port, listening, nil
+	return port, address, listening, nil
+}
+
+// parseHexAddress converts a hex-encoded address from /proc/net/tcp to a string
+// IPv4 addresses are stored as 8 hex chars (4 bytes) in little-endian
+// IPv6 addresses are stored as 32 hex chars (16 bytes) in little-endian per 32-bit word
+func parseHexAddress(hexAddr string, isIPv6 bool) (string, error) {
+	addrBytes, err := hex.DecodeString(hexAddr)
+	if err != nil {
+		return "", err
+	}
+
+	if isIPv6 {
+		if len(addrBytes) != 16 {
+			return "", fmt.Errorf("invalid IPv6 address length: %d", len(addrBytes))
+		}
+		// IPv6: stored as 4 little-endian 32-bit words
+		// We need to reverse each 4-byte group
+		for i := 0; i < 16; i += 4 {
+			addrBytes[i], addrBytes[i+1], addrBytes[i+2], addrBytes[i+3] =
+				addrBytes[i+3], addrBytes[i+2], addrBytes[i+1], addrBytes[i]
+		}
+		ip := net.IP(addrBytes)
+		return ip.String(), nil
+	}
+
+	// IPv4: stored in little-endian
+	if len(addrBytes) != 4 {
+		return "", fmt.Errorf("invalid IPv4 address length: %d", len(addrBytes))
+	}
+	// Reverse the bytes (little-endian to big-endian)
+	ip := net.IPv4(addrBytes[3], addrBytes[2], addrBytes[1], addrBytes[0])
+	return ip.String(), nil
 }
 
 // DiffPorts returns ports that are in newPorts but not in oldPorts (added)
 // and ports that are in oldPorts but not in newPorts (removed)
-func DiffPorts(oldPorts, newPorts []int) (added, removed []int) {
+// Comparison is based on port number only (not address) for logging purposes
+func DiffPorts(oldPorts, newPorts []protocol.PortInfo) (added, removed []int) {
 	oldSet := make(map[int]struct{})
 	for _, p := range oldPorts {
-		oldSet[p] = struct{}{}
+		oldSet[p.Port] = struct{}{}
 	}
 
 	newSet := make(map[int]struct{})
 	for _, p := range newPorts {
-		newSet[p] = struct{}{}
+		newSet[p.Port] = struct{}{}
 	}
 
 	for _, p := range newPorts {
-		if _, exists := oldSet[p]; !exists {
-			added = append(added, p)
+		if _, exists := oldSet[p.Port]; !exists {
+			added = append(added, p.Port)
 		}
 	}
 
 	for _, p := range oldPorts {
-		if _, exists := newSet[p]; !exists {
-			removed = append(removed, p)
+		if _, exists := newSet[p.Port]; !exists {
+			removed = append(removed, p.Port)
 		}
 	}
 

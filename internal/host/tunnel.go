@@ -122,14 +122,14 @@ func (t *TunnelManager) StopForwarding(port int) error {
 }
 
 // UpdatePorts updates the forwarded ports based on what's listening in the container
-func (t *TunnelManager) UpdatePorts(ports []int) {
+func (t *TunnelManager) UpdatePorts(ports []protocol.PortInfo) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Build set of new ports for quick lookup
+	// Build set of new ports for quick lookup (by port number only)
 	newPortSet := make(map[int]struct{})
 	for _, p := range ports {
-		newPortSet[p] = struct{}{}
+		newPortSet[p.Port] = struct{}{}
 	}
 
 	// Remove ports that are no longer listening
@@ -142,10 +142,10 @@ func (t *TunnelManager) UpdatePorts(ports []int) {
 	}
 
 	// Add new ports (using internal method that doesn't acquire lock)
-	for _, port := range ports {
-		if _, exists := t.listeners[port]; !exists {
-			if err := t.forwardPortLocked(port); err != nil {
-				t.logger.Printf("Failed to forward port %d: %v", port, err)
+	for _, p := range ports {
+		if _, exists := t.listeners[p.Port]; !exists {
+			if err := t.forwardPortLocked(p.Port); err != nil {
+				t.logger.Printf("Failed to forward port %d: %v", p.Port, err)
 			}
 		}
 	}

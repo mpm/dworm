@@ -37,9 +37,15 @@ type InitMessage struct {
 	GitCredForward   bool              `json:"git_cred_forward"`             // Whether to enable git credential forwarding
 }
 
+// PortInfo represents a listening port with its bind address
+type PortInfo struct {
+	Port    int    `json:"port"`
+	Address string `json:"address"` // The bind address (e.g., "127.0.0.1", "::1", "0.0.0.0")
+}
+
 // PortUpdateMessage is sent from endpoint to host when ports change
 type PortUpdateMessage struct {
-	Ports []int `json:"ports"`
+	Ports []PortInfo `json:"ports"`
 }
 
 // EncodeMessage wraps a typed message in the envelope format

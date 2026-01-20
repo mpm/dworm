@@ -7,11 +7,11 @@ import (
 
 func TestEncodeMessage(t *testing.T) {
 	tests := []struct {
-		name     string
-		msgType  string
-		data     interface{}
-		wantErr  bool
-		checkFn  func(t *testing.T, encoded []byte)
+		name    string
+		msgType string
+		data    interface{}
+		wantErr bool
+		checkFn func(t *testing.T, encoded []byte)
 	}{
 		{
 			name:    "init message",
@@ -33,7 +33,7 @@ func TestEncodeMessage(t *testing.T) {
 		{
 			name:    "port update",
 			msgType: TypePortUpdate,
-			data:    &PortUpdateMessage{Ports: []int{8080}},
+			data:    &PortUpdateMessage{Ports: []PortInfo{{Port: 8080, Address: "0.0.0.0"}}},
 		},
 		{
 			name:    "nil data",
@@ -184,13 +184,19 @@ func TestDecodePortUpdate(t *testing.T) {
 	}{
 		{
 			name:  "multiple ports",
-			input: `{"ports":[8080,3000,5432]}`,
+			input: `{"ports":[{"port":8080,"address":"0.0.0.0"},{"port":3000,"address":"127.0.0.1"},{"port":5432,"address":"::1"}]}`,
 			checkFn: func(t *testing.T, msg *PortUpdateMessage) {
 				if len(msg.Ports) != 3 {
 					t.Fatalf("expected 3 ports, got %d", len(msg.Ports))
 				}
-				if msg.Ports[0] != 8080 || msg.Ports[1] != 3000 || msg.Ports[2] != 5432 {
-					t.Errorf("ports mismatch: %v", msg.Ports)
+				if msg.Ports[0].Port != 8080 || msg.Ports[0].Address != "0.0.0.0" {
+					t.Errorf("port 0 mismatch: %v", msg.Ports[0])
+				}
+				if msg.Ports[1].Port != 3000 || msg.Ports[1].Address != "127.0.0.1" {
+					t.Errorf("port 1 mismatch: %v", msg.Ports[1])
+				}
+				if msg.Ports[2].Port != 5432 || msg.Ports[2].Address != "::1" {
+					t.Errorf("port 2 mismatch: %v", msg.Ports[2])
 				}
 			},
 		},
@@ -205,9 +211,9 @@ func TestDecodePortUpdate(t *testing.T) {
 		},
 		{
 			name:  "single port",
-			input: `{"ports":[8080]}`,
+			input: `{"ports":[{"port":8080,"address":"0.0.0.0"}]}`,
 			checkFn: func(t *testing.T, msg *PortUpdateMessage) {
-				if len(msg.Ports) != 1 || msg.Ports[0] != 8080 {
+				if len(msg.Ports) != 1 || msg.Ports[0].Port != 8080 {
 					t.Error("expected single port 8080")
 				}
 			},

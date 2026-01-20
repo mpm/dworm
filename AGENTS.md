@@ -61,9 +61,13 @@ internal/
 - **Tunnel streams**: Stream 1+, raw TCP proxy data
 - **BiProxy utility**: `protocol.BiProxy(conn1, conn2)` handles bidirectional copying with proper shutdown
 
+Message types:
+- `InitMessage`: env vars, agent forwarding config
+- `PortUpdateMessage`: contains `[]PortInfo` where each `PortInfo` has `Port int` and `Address string` (bind address)
+
 Message flow:
 1. Host sends `init` with env vars and agent forwarding config
-2. Endpoint sends `port_update` when listening ports change
+2. Endpoint sends `port_update` when listening ports change (includes bind addresses)
 3. Host opens new yamux stream for each tunnel connection
 4. Stream header: 4-byte port number, 1-byte success response
 
@@ -117,9 +121,23 @@ Two modes of operation:
 
 Parses `/proc/net/tcp` and `/proc/net/tcp6`:
 - Format: `sl local_address rem_address st ...`
-- Local address is `IP:PORT` in hex
+- Local address is `IP:PORT` in hex (little-endian for IPv4, per-word little-endian for IPv6)
 - State `0A` = TCP_LISTEN
 - Filters to ports 1024-20000
+- Returns `[]protocol.PortInfo` with both port number and bind address (e.g., `127.0.0.1`, `::1`, `0.0.0.0`)
+
+Address parsing (`parseHexAddress`):
+- IPv4: 8 hex chars, stored little-endian (e.g., `0100007F` → `127.0.0.1`)
+- IPv6: 32 hex chars, stored as 4 little-endian 32-bit words
+
+When connecting to a detected port, endpoint uses the actual bind address:
+- `0.0.0.0` → connects to `127.0.0.1`
+- `::` → connects to `[::1]`
+- `::1` → connects to `[::1]`
+- Other addresses → connects directly to that address
+
+If same port bound to multiple addresses, `preferAddress()` selects the most connectable:
+priority: `0.0.0.0`/`::` > specific IPs > `127.0.0.1`/`::1`
 
 ### Tunnel Manager (`internal/host/tunnel.go`)
 

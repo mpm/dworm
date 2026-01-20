@@ -60,7 +60,11 @@ func TestMuxBidirectionalControl(t *testing.T) {
 
 	// Send port update from endpoint to host
 	portMsg := &protocol.PortUpdateMessage{
-		Ports: []int{8080, 3000, 5432},
+		Ports: []protocol.PortInfo{
+			{Port: 8080, Address: "0.0.0.0"},
+			{Port: 3000, Address: "127.0.0.1"},
+			{Port: 5432, Address: "::1"},
+		},
 	}
 
 	if err := h.EndpointMux.SendControl(protocol.TypePortUpdate, portMsg); err != nil {
@@ -85,7 +89,7 @@ func TestMuxBidirectionalControl(t *testing.T) {
 	if len(received.Ports) != 3 {
 		t.Fatalf("expected 3 ports, got %d", len(received.Ports))
 	}
-	if received.Ports[0] != 8080 || received.Ports[1] != 3000 || received.Ports[2] != 5432 {
+	if received.Ports[0].Port != 8080 || received.Ports[1].Port != 3000 || received.Ports[2].Port != 5432 {
 		t.Errorf("ports mismatch: got %v", received.Ports)
 	}
 }
@@ -404,7 +408,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		{
 			name:    "port update",
 			msgType: protocol.TypePortUpdate,
-			data:    &protocol.PortUpdateMessage{Ports: []int{8080, 3000}},
+			data:    &protocol.PortUpdateMessage{Ports: []protocol.PortInfo{{Port: 8080, Address: "0.0.0.0"}, {Port: 3000, Address: "127.0.0.1"}}},
 		},
 		{
 			name:    "ping",

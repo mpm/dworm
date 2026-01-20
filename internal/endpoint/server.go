@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/mpm/dworm/internal/protocol"
@@ -16,7 +17,8 @@ import (
 type Server struct {
 	mux              *protocol.Mux
 	envVars          map[string]string
-	currentPorts     []int
+	currentPorts     []protocol.PortInfo
+	portAddresses    map[int]string // port -> best bind address for connecting
 	logger           *log.Logger
 	agentForwarder   *AgentForwarder
 	gpgForwarder     *GPGForwarder
@@ -26,7 +28,8 @@ type Server struct {
 // NewServer creates a new endpoint server
 func NewServer() *Server {
 	return &Server{
-		logger: log.New(protocol.NewCRWriter(os.Stderr), "[endpoint] ", log.LstdFlags),
+		logger:        log.New(protocol.NewCRWriter(os.Stderr), "[endpoint] ", log.LstdFlags),
+		portAddresses: make(map[int]string),
 	}
 }
 
@@ -170,6 +173,21 @@ func (s *Server) scanAndReport() {
 
 		s.currentPorts = ports
 
+		// Build port -> address lookup map
+		// For ports with multiple addresses, prefer more connectable ones:
+		// 0.0.0.0 > specific IP > 127.0.0.1 (IPv4)
+		// :: > specific IP > ::1 (IPv6)
+		s.portAddresses = make(map[int]string)
+		for _, p := range ports {
+			existing, hasExisting := s.portAddresses[p.Port]
+			if !hasExisting {
+				s.portAddresses[p.Port] = p.Address
+			} else {
+				// Prefer the more "connectable" address
+				s.portAddresses[p.Port] = preferAddress(existing, p.Address)
+			}
+		}
+
 		// Send port update
 		if err := s.mux.SendControl(protocol.TypePortUpdate, &protocol.PortUpdateMessage{
 			Ports: ports,
@@ -177,6 +195,25 @@ func (s *Server) scanAndReport() {
 			s.logger.Printf("Failed to send port update: %v", err)
 		}
 	}
+}
+
+// preferAddress returns the address that's more likely to be connectable
+// Priority: 0.0.0.0/:: (all interfaces) > specific IPs > localhost
+func preferAddress(a, b string) string {
+	priority := func(addr string) int {
+		switch addr {
+		case "0.0.0.0", "::":
+			return 3 // Highest - listens on all interfaces
+		case "127.0.0.1", "::1":
+			return 1 // Lowest - only localhost
+		default:
+			return 2 // Middle - specific interface
+		}
+	}
+	if priority(a) >= priority(b) {
+		return a
+	}
+	return b
 }
 
 func (s *Server) acceptTunnelStreams() {
@@ -206,10 +243,34 @@ func (s *Server) handleTunnelStream(stream net.Conn) {
 
 	port := int(portBuf[0])<<24 | int(portBuf[1])<<16 | int(portBuf[2])<<8 | int(portBuf[3])
 
+	// Look up the bind address for this port
+	bindAddr, ok := s.portAddresses[port]
+	if !ok {
+		// Fallback to localhost if port not in our map (shouldn't happen normally)
+		bindAddr = "127.0.0.1"
+	}
+
+	// Format the dial address (IPv6 addresses need brackets)
+	var dialAddr string
+	if strings.Contains(bindAddr, ":") {
+		// IPv6 address
+		dialAddr = fmt.Sprintf("[%s]:%d", bindAddr, port)
+	} else {
+		dialAddr = fmt.Sprintf("%s:%d", bindAddr, port)
+	}
+
+	// For addresses like 0.0.0.0 or ::, connect to localhost instead
+	// (they listen on all interfaces, but we connect via localhost)
+	if bindAddr == "0.0.0.0" {
+		dialAddr = fmt.Sprintf("127.0.0.1:%d", port)
+	} else if bindAddr == "::" {
+		dialAddr = fmt.Sprintf("[::1]:%d", port)
+	}
+
 	// Connect to local port
-	localConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	localConn, err := net.Dial("tcp", dialAddr)
 	if err != nil {
-		s.logger.Printf("Failed to connect to local port %d: %v", port, err)
+		s.logger.Printf("Failed to connect to local port %d (%s): %v", port, dialAddr, err)
 		// Send error response
 		stream.Write([]byte{0}) // 0 = failure
 		return

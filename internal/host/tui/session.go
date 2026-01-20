@@ -14,10 +14,10 @@ import (
 
 // Common clear screen sequences that we need to detect
 var clearSequences = [][]byte{
-	[]byte("\x1b[2J"),  // Clear entire screen
-	[]byte("\x1b[3J"),  // Clear entire screen including scrollback
-	[]byte("\x1bc"),    // Full terminal reset
-	[]byte("\x1b[H"),   // Cursor home (often used with 2J)
+	[]byte("\x1b[2J"), // Clear entire screen
+	[]byte("\x1b[3J"), // Clear entire screen including scrollback
+	[]byte("\x1bc"),   // Full terminal reset
+	[]byte("\x1b[H"),  // Cursor home (often used with 2J)
 }
 
 const (
