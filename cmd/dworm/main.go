@@ -331,15 +331,13 @@ func runUp(cmd *cobra.Command, args []string) error {
 		logger.Printf("Shutting down...")
 	} else {
 		// Start interactive shell with TUI
-		session := tui.NewShellSession(
+		if err := tui.Run(
 			containerInfo.ContainerID,
 			containerInfo.ContainerName,
 			containerInfo.WorkspaceDir,
 			envs,
 			tuiPortUpdateCh,
-		)
-
-		if err := session.Run(); err != nil {
+		); err != nil {
 			// Check if it's just an exit code
 			if !strings.HasPrefix(err.Error(), "exit ") {
 				logger.Printf("Shell error: %v", err)

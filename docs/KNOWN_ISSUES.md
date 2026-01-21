@@ -2,6 +2,18 @@
 
 This document tracks known limitations and potential issues with existing functionality. These are not bugs per se, but areas where the implementation could be more robust.
 
+## TUI Architecture
+
+### bubbleterm/bubbletea v2 incompatibility
+
+**Issue**: The original plan to migrate to Bubble Tea + bubbleterm for terminal embedding was blocked because bubbleterm requires bubbletea v2 (beta), which has compilation errors with current charmbracelet/x/ansi versions.
+
+**Current implementation**: Uses lipgloss for status bar styling but retains the 3-goroutine terminal handling architecture (output reader, input handler, event handler) with direct PTY I/O.
+
+**Future path**: When bubbletea v2 stabilizes, the TUI could be migrated to use bubbleterm for proper terminal emulation. This would enable damage tracking (partial screen updates) which improves SSH performance.
+
+**Files affected**: `internal/host/tui/model.go`, `internal/host/tui/statusbar.go`
+
 ## GPG Agent Forwarding
 
 ### gpg-agent auto-respawn

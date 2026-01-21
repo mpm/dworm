@@ -1,0 +1,27 @@
+# Questions/Plans
+
+How to setup a github workflow that builds the binaries.
+How are releases handled? Work on dev branch, posting to main triggers build? Trigger build/release by tag?
+How is client side installation handled, shell install script?
+Is there a service to build packages for most popular distros? (incl snap/flatpak)
+Should the distribution package contain dworm_endpoint binaries for all architectures?
+
+BUGS:
+hitting enter in the terminal doesn't work but shows ansi sequences
+
+UX:
+should the default be that `dworm up/down` assumes you want to do this with the cwd? if not, you have to explicitly
+specify the directory.
+
+optionally disable forwarding for ssh/gpg/ssh?
+allow adding projecting standard directories (for claude code)
+forwarding of more exotic stuff (pulse audio?, desktop notifications, dbus)
+
+make default invocation launch a shell and have a TUI statusbar that displays open ports etc.
+if this exits, it also shuts down the container (if it wasn't previously running?)
+
+alternatively, one can run the tool without opening a shell, it'll just log the output to stdout instead.
+
+
+Global:
+share rules in claude code, so dass ich nicht immer find und grep und anderes freischalten muss.

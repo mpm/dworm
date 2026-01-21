@@ -34,11 +34,11 @@ internal/
 │   ├── shell.go            # Interactive shell via docker exec (fallback)
 │   ├── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
 │   └── tui/                # Terminal UI for interactive shell
-│       ├── session.go      # Shell session with PTY and status line
-│       ├── statusline.go   # Bottom status bar showing container/ports
-│       ├── termwriter.go   # Terminal output wrapper
-│       ├── ansi.go         # ANSI escape sequence helpers
-│       └── pty.go          # PTY utilities
+│       ├── model.go        # Main TUI session with PTY and 3-goroutine architecture
+│       ├── statusbar.go    # Status bar component (lipgloss-styled)
+│       ├── messages.go     # Message types (PortMapping, PortUpdateMsg)
+│       ├── styles.go       # lipgloss style definitions
+│       └── fallback.go     # Non-TTY fallback mode
 ├── endpoint/               # Container-side only
 │   ├── server.go           # Main server loop, handles control messages
 │   ├── portscanner.go      # Scans /proc/net/tcp for listening ports
@@ -149,9 +149,18 @@ For each detected port:
 
 Interactive shell with status line showing container name and forwarded ports:
 - Uses PTY for proper terminal handling (resize, raw mode)
-- Status line at bottom of terminal shows: container name, forwarded ports
+- 3-goroutine architecture: output reader, input handler, event handler
+- Status bar at bottom styled with lipgloss (reverse video)
+- Scroll region restricts shell output to above status bar
 - Toggle expanded port view with Ctrl+G
+- Clear screen detection re-renders status bar after vim/htop/etc
 - Falls back to basic `docker exec` shell if not running in a TTY
+
+Key files:
+- `model.go`: Main `Run()` function and session orchestration
+- `statusbar.go`: `StatusBar` component with collapsed/expanded modes
+- `messages.go`: `PortMapping` and `PortUpdateMsg` types
+- `fallback.go`: Non-TTY fallback for piped/scripted usage
 
 ## Build
 
@@ -270,7 +279,9 @@ Host: yamux stream → git credential fill/approve/reject → response
 
 - `github.com/spf13/cobra` - CLI framework
 - `github.com/hashicorp/yamux` - Stream multiplexing
-- `golang.org/x/term` - Terminal handling for TUI
+- `github.com/charmbracelet/lipgloss` - Terminal styling for status bar
+- `github.com/creack/pty` - PTY handling for shell sessions
+- `golang.org/x/term` - Terminal mode handling
 
 ## Error Handling Patterns
 
