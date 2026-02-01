@@ -82,6 +82,28 @@ environments.`,
 	}
 	rootCmd.AddCommand(statusCmd)
 
+	// Remove command
+	var forceRemove bool
+	removeCmd := &cobra.Command{
+		Use:   "remove",
+		Short: "Stop, remove container and its image",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRemove(cmd, args, forceRemove)
+		},
+	}
+	removeCmd.Flags().BoolVarP(&forceRemove, "force", "f", false, "Skip confirmation prompt")
+	rootCmd.AddCommand(removeCmd)
+
+	// Rebuild command
+	rebuildCmd := &cobra.Command{
+		Use:   "rebuild",
+		Short: "Rebuild the devcontainer from scratch",
+		Args:  cobra.NoArgs,
+		RunE:  runRebuild,
+	}
+	rootCmd.AddCommand(rebuildCmd)
+
 	// Start version check in background (non-blocking)
 	updateCh := make(chan *version.CheckResult, 1)
 	go func() {
@@ -383,6 +405,54 @@ func runShell(cmd *cobra.Command, args []string) error {
 	}
 
 	return host.ExecShell(containerID, "", parseEnvVars())
+}
+
+func runRemove(cmd *cobra.Command, args []string, force bool) error {
+	workspacePath, err := getWorkspacePath()
+	if err != nil {
+		return err
+	}
+
+	if !force {
+		fmt.Fprintf(crStdout, "This will remove the devcontainer and its image for %s. Continue? [y/N] ", workspacePath)
+		var answer string
+		fmt.Scanln(&answer)
+		if answer != "y" && answer != "Y" {
+			fmt.Fprintln(crStdout, "Aborted.")
+			return nil
+		}
+	}
+
+	logger.Printf("Removing devcontainer at %s...", workspacePath)
+
+	if err := host.DevcontainerRemove(workspacePath, true); err != nil {
+		return fmt.Errorf("failed to remove devcontainer: %w", err)
+	}
+
+	logger.Printf("Container and image removed")
+	return nil
+}
+
+func runRebuild(cmd *cobra.Command, args []string) error {
+	workspacePath, err := getWorkspacePath()
+	if err != nil {
+		return err
+	}
+
+	cfgPath, err := getConfigPath()
+	if err != nil {
+		return err
+	}
+
+	logger.Printf("Rebuilding devcontainer at %s...", workspacePath)
+
+	containerInfo, err := host.DevcontainerRebuild(workspacePath, cfgPath)
+	if err != nil {
+		return fmt.Errorf("failed to rebuild devcontainer: %w", err)
+	}
+
+	logger.Printf("Container rebuilt: %s", containerInfo.ContainerName)
+	return nil
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {

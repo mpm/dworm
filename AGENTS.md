@@ -28,7 +28,7 @@ internal/
 │   ├── writer.go           # CRWriter for terminal output
 │   └── testutil/harness.go # Test harness for in-process testing
 ├── host/                   # Host-side only
-│   ├── container.go        # Devcontainer lifecycle (up/down via devcontainer CLI + docker)
+│   ├── container.go        # Devcontainer lifecycle (up/down/remove/rebuild via devcontainer CLI + docker)
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
 │   ├── shell.go            # Interactive shell via docker exec (fallback)
@@ -92,7 +92,7 @@ Shared constants (`internal/protocol/constants.go`):
 
 ### Host Binary (`cmd/dworm/`)
 
-Entry point uses Cobra with subcommands: `up`, `down`, `shell`, `status`
+Entry point uses Cobra with subcommands: `up`, `down`, `shell`, `status`, `remove`, `rebuild`
 
 CLI flags:
 - `--version` / `-v`: Show version info (handled by Cobra)
@@ -101,6 +101,8 @@ CLI flags:
 Key flows:
 - `up`: DevcontainerUp → InjectAndStart → SendInit → handle port updates → ForwardPort
 - `down`: DevcontainerDown (finds container by label, docker stop)
+- `remove [--force]`: DevcontainerRemove (finds container by label, docker stop + rm + rmi; prompts for confirmation unless `--force`)
+- `rebuild`: DevcontainerRebuild (calls `devcontainer up --remove-existing-container`; rebuilds and exits, user runs `up` separately)
 
 ### Endpoint Binary (`cmd/dworm_endpoint/`)
 
@@ -217,6 +219,8 @@ E2E scripts in `test/e2e/`:
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
 - `test-git-creds.sh` - Git credential forwarding (conditional)
+- `test-rebuild.sh` - Rebuild command
+- `test-remove.sh` - Remove command (container + image cleanup)
 
 Conditional tests use exit code 77 to skip (autotools convention).
 

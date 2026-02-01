@@ -82,6 +82,13 @@ dworm shell
 
 # Check container status
 dworm status
+
+# Remove container and its image (prompts for confirmation)
+dworm remove
+dworm remove --force  # skip confirmation
+
+# Rebuild the container from scratch
+dworm rebuild
 ```
 
 ### Example workflow

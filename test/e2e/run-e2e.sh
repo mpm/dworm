@@ -39,6 +39,8 @@ run_test "test-env-vars.sh"
 run_test "test-ssh-agent.sh"
 run_test "test-gpg-agent.sh"
 run_test "test-git-creds.sh"
+run_test "test-rebuild.sh"
+run_test "test-remove.sh"
 
 # Summary
 echo ""
