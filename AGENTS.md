@@ -62,11 +62,11 @@ internal/
 - **BiProxy utility**: `protocol.BiProxy(conn1, conn2)` handles bidirectional copying with proper shutdown
 
 Message types:
-- `InitMessage`: env vars, agent forwarding config
+- `InitMessage`: env vars, agent forwarding config, GPG public keys
 - `PortUpdateMessage`: contains `[]PortInfo` where each `PortInfo` has `Port int` and `Address string` (bind address)
 
 Message flow:
-1. Host sends `init` with env vars and agent forwarding config
+1. Host sends `init` with env vars, agent forwarding config, and GPG public keys
 2. Endpoint sends `port_update` when listening ports change (includes bind addresses)
 3. Host opens new yamux stream for each tunnel connection
 4. Stream header: 4-byte port number, 1-byte success response
@@ -74,7 +74,7 @@ Message flow:
 Agent/credential forwarding (reverse direction, endpoint → host):
 - Stream type markers: `StreamTypeAgent` (0x01) for SSH, `StreamTypeGPG` (0x02) for GPG, `StreamTypeGitCred` (0x03) for git credentials
 - SSH: Endpoint creates socket at `protocol.SSHAgentSocketPath`, sets `SSH_AUTH_SOCK` env var
-- GPG: Endpoint runs `gpgconf --list-dirs agent-socket` to find expected path (e.g., `~/.gnupg/S.gpg-agent`), kills existing agent, creates socket there
+- GPG: Host exports public keys via `gpg --export --armor`, sends in `InitMessage.GPGPublicKeys`. Endpoint imports them via `gpg --import` before starting forwarder. Endpoint runs `gpgconf --list-dirs agent-socket` to find expected path (e.g., `~/.gnupg/S.gpg-agent`), kills existing agent, creates socket there
 - Git: Endpoint creates socket at `protocol.GitCredentialSocket`, creates helper script at `protocol.GitCredentialHelperPath`, configures git to use it
 - On client connect: endpoint opens yamux stream to host with type marker, host proxies to local agent socket (SSH/GPG) or runs `git credential` command (git)
 

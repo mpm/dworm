@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"time"
@@ -92,6 +93,17 @@ func (s *Server) waitForInit() error {
 		s.agentForwarder = NewAgentForwarder(initMsg.AgentSocketPath, s.mux, s.logger)
 		if err := s.agentForwarder.Start(); err != nil {
 			s.logger.Printf("Warning: failed to start agent forwarder: %v", err)
+		}
+	}
+
+	// Import GPG public keys if provided (before starting GPG forwarder)
+	if initMsg.GPGPublicKeys != "" {
+		importCmd := exec.Command("gpg", "--import", "--batch")
+		importCmd.Stdin = strings.NewReader(initMsg.GPGPublicKeys)
+		if output, err := importCmd.CombinedOutput(); err != nil {
+			s.logger.Printf("Warning: failed to import GPG public keys: %v (output: %s)", err, string(output))
+		} else {
+			s.logger.Printf("GPG public keys imported")
 		}
 	}
 

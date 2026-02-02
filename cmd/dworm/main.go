@@ -239,6 +239,18 @@ func runUp(cmd *cobra.Command, args []string) error {
 	gpgForward := gpgErr == nil
 	containerGPGSocket := protocol.GPGAgentSocketPath
 
+	// Export GPG public keys if forwarding is enabled
+	gpgPublicKeys := ""
+	if gpgForward {
+		exportCmd := exec.Command("gpg", "--export", "--armor")
+		if output, err := exportCmd.Output(); err != nil {
+			logger.Printf("Warning: failed to export GPG public keys: %v", err)
+		} else if len(output) > 0 {
+			gpgPublicKeys = string(output)
+			logger.Printf("Exported GPG public keys (%d bytes)", len(output))
+		}
+	}
+
 	if !gpgForward {
 		logger.Printf("Warning: GPG agent forwarding disabled (%v)", gpgErr)
 	}
@@ -266,7 +278,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Send init message
 	envs := parseEnvVars()
-	if err := endpoint.SendInit(envs, sshForward, containerSSHSocket, gpgForward, containerGPGSocket, gitConfig, gitCredForward); err != nil {
+	if err := endpoint.SendInit(envs, sshForward, containerSSHSocket, gpgForward, containerGPGSocket, gitConfig, gitCredForward, gpgPublicKeys); err != nil {
 		endpoint.Close()
 		return fmt.Errorf("failed to send init: %w", err)
 	}

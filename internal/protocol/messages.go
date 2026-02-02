@@ -35,6 +35,7 @@ type InitMessage struct {
 	GPGSocketPath    string            `json:"gpg_socket_path,omitempty"`    // Path for GPG agent socket in container
 	GitConfigContent string            `json:"git_config_content,omitempty"` // Content of host's ~/.gitconfig
 	GitCredForward   bool              `json:"git_cred_forward"`             // Whether to enable git credential forwarding
+	GPGPublicKeys    string            `json:"gpg_public_keys,omitempty"`    // Armored GPG public keys to import
 }
 
 // PortInfo represents a listening port with its bind address
