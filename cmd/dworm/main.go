@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -205,14 +206,25 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	logger.Printf("Container started: %s", containerInfo.ContainerName)
 
+	// In interactive (non-daemon) mode, route logs to a buffer for the TUI
+	var logBuffer *tui.LogBuffer
+	var logUpdateCh <-chan struct{}
+	var logWriter io.Writer
+	if !daemonMode {
+		logBuffer, logUpdateCh = tui.NewLogBuffer(100)
+		logWriter = logBuffer
+		// Redirect the main logger to the buffer
+		logger.SetOutput(logWriter)
+	}
+
 	// Find endpoint binary
 	endpointPath, err := host.GetEndpointBinaryPath()
 	if err != nil {
 		return fmt.Errorf("endpoint binary not found: %w", err)
 	}
 
-	// Create endpoint manager
-	endpoint := host.NewEndpointManager(containerInfo.ContainerID)
+	// Create endpoint manager (pass logWriter; nil in daemon mode falls back to stderr)
+	endpoint := host.NewEndpointManager(containerInfo.ContainerID, logWriter)
 
 	// Inject and start endpoint
 	if err := endpoint.InjectAndStart(endpointPath); err != nil {
@@ -312,7 +324,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create tunnel manager and port update channel
-	tunnels := host.NewTunnelManager(endpoint, bindAddr)
+	var tunnelLogWriter io.Writer = protocol.NewCRWriter(os.Stderr)
+	if logWriter != nil {
+		tunnelLogWriter = logWriter
+	}
+	tunnelLogger := log.New(tunnelLogWriter, "[tunnel] ", log.LstdFlags)
+	tunnels := host.NewTunnelManager(endpoint, bindAddr, tunnelLogger)
 	portUpdateCh := make(chan []host.PortMapping, 10)
 	tunnels.SetPortUpdateChannel(portUpdateCh)
 
@@ -371,6 +388,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 			containerInfo.WorkspaceDir,
 			envs,
 			tuiPortUpdateCh,
+			logBuffer,
+			logUpdateCh,
 		); err != nil {
 			// Check if it's just an exit code
 			if !strings.HasPrefix(err.Error(), "exit ") {

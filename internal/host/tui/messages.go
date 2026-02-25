@@ -17,5 +17,8 @@ type ProcessExitedMsg struct {
 	Error    error
 }
 
+// LogUpdateMsg is sent when new log lines are available
+type LogUpdateMsg struct{}
+
 // pollTerminalMsg triggers a terminal refresh
 type pollTerminalMsg struct{}

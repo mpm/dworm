@@ -10,6 +10,7 @@ import (
 type StatusBar struct {
 	containerName string
 	ports         []PortMapping
+	logs          []string
 	expanded      bool
 	width         int
 	height        int
@@ -33,6 +34,11 @@ func (s *StatusBar) SetPorts(ports []PortMapping) {
 	s.ports = ports
 }
 
+// SetLogs updates the stored log lines
+func (s *StatusBar) SetLogs(logs []string) {
+	s.logs = logs
+}
+
 // ToggleExpanded toggles the expanded panel state
 func (s *StatusBar) ToggleExpanded() {
 	s.expanded = !s.expanded
@@ -53,12 +59,17 @@ func (s *StatusBar) Height() int {
 	if !s.expanded {
 		return 1
 	}
-	// Expanded: header + ports + footer
+	// Expanded: header + ports + separator + log header + logs + footer
 	numPorts := len(s.ports)
 	if numPorts == 0 {
 		numPorts = 1 // "No ports forwarded" line
 	}
-	height := 2 + numPorts + 2 // header + ports + footer with separators
+	numLogs := len(s.logs)
+	if numLogs == 0 {
+		numLogs = 1 // "No log messages" line
+	}
+	// header + ports + blank separator + log header + logs + footer
+	height := 1 + numPorts + 1 + 1 + numLogs + 1
 	maxHeight := s.height / 2
 	if height > maxHeight {
 		height = maxHeight
@@ -139,15 +150,40 @@ func (s *StatusBar) renderExpanded() string {
 	headerLine := s.buildBoxLine(header, '─')
 	lines = append(lines, ExpandedPanelStyle.Width(s.width).Render(headerLine))
 
+	// Calculate space: total height - header(1) - footer(1) = content area
+	contentRows := height - 2
+	// Reserve at least 2 rows for logs section (header + 1 line)
+	maxPortRows := contentRows - 3 // separator + log header + at least 1 log line
+	if maxPortRows < 1 {
+		maxPortRows = 1
+	}
+
 	// Port list
-	portLines := s.formatPortsExpanded(height - 3)
+	portLines := s.formatPortsExpanded(maxPortRows)
 	for _, line := range portLines {
 		paddedLine := padRight("  "+line, s.width)
 		lines = append(lines, ExpandedPanelStyle.Width(s.width).Render(paddedLine))
 	}
 
+	// Separator + log header
+	logHeader := " Logs "
+	logHeaderLine := s.buildBoxLine(logHeader, '─')
+	lines = append(lines, ExpandedPanelStyle.Width(s.width).Render(logHeaderLine))
+
+	// Log lines - fill remaining space
+	usedRows := 1 + len(portLines) + 1 // header + ports + log header
+	logRows := height - usedRows - 1    // minus footer
+	if logRows < 1 {
+		logRows = 1
+	}
+	logLines := s.formatLogsExpanded(logRows)
+	for _, line := range logLines {
+		paddedLine := padRight("  "+line, s.width)
+		lines = append(lines, ExpandedPanelStyle.Width(s.width).Render(paddedLine))
+	}
+
 	// Fill remaining rows if any
-	usedRows := 1 + len(portLines)
+	usedRows = 1 + len(portLines) + 1 + len(logLines)
 	for i := usedRows; i < height-1; i++ {
 		lines = append(lines, ExpandedPanelStyle.Width(s.width).Render(spaces(s.width)))
 	}
@@ -214,6 +250,30 @@ func (s *StatusBar) formatPortsExpanded(maxLines int) []string {
 		lines = append(lines, fmt.Sprintf("localhost:%d → container:%d", p.LocalPort, p.ContainerPort))
 	}
 
+	return lines
+}
+
+func (s *StatusBar) formatLogsExpanded(maxLines int) []string {
+	if len(s.logs) == 0 {
+		return []string{"No log messages"}
+	}
+
+	// Show the most recent lines that fit
+	start := 0
+	if len(s.logs) > maxLines {
+		start = len(s.logs) - maxLines
+	}
+
+	lines := make([]string, 0, maxLines)
+	for i := start; i < len(s.logs); i++ {
+		line := s.logs[i]
+		// Truncate long lines to fit terminal width (minus indent)
+		maxLen := s.width - 4
+		if maxLen > 0 && len(line) > maxLen {
+			line = truncateWithEllipsis(line, maxLen)
+		}
+		lines = append(lines, line)
+	}
 	return lines
 }
 

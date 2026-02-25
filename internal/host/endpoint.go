@@ -19,13 +19,21 @@ type EndpointManager struct {
 	mux          *protocol.Mux
 	cmd          *exec.Cmd
 	logger       *log.Logger
+	stderrWriter io.Writer
 }
 
-// NewEndpointManager creates a new endpoint manager
-func NewEndpointManager(containerID string) *EndpointManager {
+// NewEndpointManager creates a new endpoint manager.
+// If logWriter is non-nil, it is used for both the host logger and endpoint stderr.
+// Otherwise, logs go to os.Stderr via CRWriter.
+func NewEndpointManager(containerID string, logWriter io.Writer) *EndpointManager {
+	stderr := io.Writer(protocol.NewCRWriter(os.Stderr))
+	if logWriter != nil {
+		stderr = logWriter
+	}
 	return &EndpointManager{
-		containerID: containerID,
-		logger:      log.New(protocol.NewCRWriter(os.Stderr), "[host] ", log.LstdFlags),
+		containerID:  containerID,
+		logger:       log.New(stderr, "[host] ", log.LstdFlags),
+		stderrWriter: stderr,
 	}
 }
 
@@ -62,8 +70,8 @@ func (e *EndpointManager) InjectAndStart(endpointBinaryPath string) error {
 		return fmt.Errorf("failed to get stdout pipe: %w", err)
 	}
 
-	// Forward stderr to our stderr
-	e.cmd.Stderr = os.Stderr
+	// Forward stderr to configured writer
+	e.cmd.Stderr = e.stderrWriter
 
 	if err := e.cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start endpoint: %w", err)

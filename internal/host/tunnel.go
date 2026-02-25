@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"sync"
 
 	"github.com/mpm/dworm/internal/protocol"
@@ -26,16 +25,17 @@ type TunnelManager struct {
 	bindAddr     string
 }
 
-// NewTunnelManager creates a new tunnel manager
-// bindAddr specifies the address to bind forwarded ports to (e.g., "127.0.0.1" or "0.0.0.0")
-func NewTunnelManager(endpoint *EndpointManager, bindAddr string) *TunnelManager {
+// NewTunnelManager creates a new tunnel manager.
+// bindAddr specifies the address to bind forwarded ports to (e.g., "127.0.0.1" or "0.0.0.0").
+// logger is used for tunnel log messages; it must not be nil.
+func NewTunnelManager(endpoint *EndpointManager, bindAddr string, logger *log.Logger) *TunnelManager {
 	if bindAddr == "" {
 		bindAddr = "127.0.0.1"
 	}
 	return &TunnelManager{
 		endpoint:  endpoint,
 		listeners: make(map[int]net.Listener),
-		logger:    log.New(protocol.NewCRWriter(os.Stderr), "[tunnel] ", log.LstdFlags),
+		logger:    logger,
 		bindAddr:  bindAddr,
 	}
 }

@@ -43,6 +43,8 @@ type Model struct {
 
 	statusBar     *StatusBar
 	portUpdateCh  <-chan []PortMapping
+	logUpdateCh   <-chan struct{}
+	logBuffer     *LogBuffer
 	outputMu      sync.Mutex
 	output        io.Writer
 	ptmx          *os.File
@@ -63,8 +65,9 @@ func New(containerID, containerName, workDir string, envVars map[string]string) 
 	}
 }
 
-// Run starts the TUI session and blocks until it exits
-func Run(containerID, containerName, workDir string, envVars map[string]string, portUpdateCh <-chan []PortMapping) error {
+// Run starts the TUI session and blocks until it exits.
+// logBuffer and logUpdateCh may be nil if log routing is not enabled.
+func Run(containerID, containerName, workDir string, envVars map[string]string, portUpdateCh <-chan []PortMapping, logBuffer *LogBuffer, logUpdateCh <-chan struct{}) error {
 	// Check if we have a TTY
 	if !IsTerminal(int(os.Stdin.Fd())) || !IsTerminal(int(os.Stdout.Fd())) {
 		return runFallback(containerID, containerName, workDir, envVars)
@@ -72,6 +75,8 @@ func Run(containerID, containerName, workDir string, envVars map[string]string, 
 
 	m := New(containerID, containerName, workDir, envVars)
 	m.portUpdateCh = portUpdateCh
+	m.logBuffer = logBuffer
+	m.logUpdateCh = logUpdateCh
 	return m.run()
 }
 
@@ -118,6 +123,11 @@ func (m *Model) run() error {
 
 	// Clear the entire visible area
 	m.clearScreen(shellHeight, height)
+
+	// Load any pre-existing log lines into the status bar
+	if m.logBuffer != nil {
+		m.statusBar.SetLogs(m.logBuffer.Lines())
+	}
 
 	// Initial status bar render
 	m.renderStatusBar()
@@ -274,6 +284,14 @@ func (m *Model) handleEvents(sigCh chan os.Signal) {
 			if m.statusBar != nil {
 				m.statusBar.SetPorts(ports)
 				m.renderStatusBar()
+			}
+
+		case <-m.logUpdateCh:
+			if m.statusBar != nil && m.logBuffer != nil {
+				m.statusBar.SetLogs(m.logBuffer.Lines())
+				if m.statusBar.IsExpanded() {
+					m.renderStatusBar()
+				}
 			}
 		}
 	}
