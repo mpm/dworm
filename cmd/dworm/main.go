@@ -74,6 +74,15 @@ environments.`,
 	}
 	rootCmd.AddCommand(shellCmd)
 
+	// Exec command
+	execCmd := &cobra.Command{
+		Use:   "exec -- COMMAND [ARG...]",
+		Short: "Run a command in the container and exit",
+		Args:  cobra.MinimumNArgs(1),
+		RunE:  runExec,
+	}
+	rootCmd.AddCommand(execCmd)
+
 	// Status command
 	statusCmd := &cobra.Command{
 		Use:   "status",
@@ -436,6 +445,20 @@ func runShell(cmd *cobra.Command, args []string) error {
 	}
 
 	return host.ExecShell(containerID, "", parseEnvVars())
+}
+
+func runExec(cmd *cobra.Command, args []string) error {
+	workspacePath, err := getWorkspacePath()
+	if err != nil {
+		return err
+	}
+
+	containerID, err := host.GetContainerID(workspacePath)
+	if err != nil {
+		return fmt.Errorf("failed to get container ID: %w", err)
+	}
+
+	return host.ExecCommand(containerID, "", parseEnvVars(), args)
 }
 
 func runRemove(cmd *cobra.Command, args []string, force bool) error {

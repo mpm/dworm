@@ -5,26 +5,26 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"syscall"
 )
 
 // ExecShell opens an interactive shell in the container
 func ExecShell(containerID string, workDir string, envVars map[string]string) error {
-	// Determine shell to use
-	shell := "/bin/bash"
+	return execInContainer(containerID, workDir, envVars, true, []string{"/bin/bash"})
+}
 
-	args := []string{"exec", "-it"}
-
-	if workDir != "" {
-		args = append(args, "-w", workDir)
+// ExecCommand runs a command in the container and exits when it completes.
+func ExecCommand(containerID string, workDir string, envVars map[string]string, command []string) error {
+	if len(command) == 0 {
+		return fmt.Errorf("no command specified")
 	}
 
-	// Add environment variables
-	for key, value := range envVars {
-		args = append(args, "-e", key+"="+value)
-	}
+	return execInContainer(containerID, workDir, envVars, false, command)
+}
 
-	args = append(args, containerID, shell)
+func execInContainer(containerID string, workDir string, envVars map[string]string, interactive bool, command []string) error {
+	args := buildDockerExecArgs(containerID, workDir, envVars, interactive, command)
 
 	cmd := exec.Command("docker", args...)
 	cmd.Stdin = os.Stdin
@@ -45,12 +45,39 @@ func ExecShell(containerID string, workDir string, envVars map[string]string) er
 	}()
 
 	if err := cmd.Run(); err != nil {
-		// Exit code from shell is not an error
+		// Exit code from command is not an execution error.
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		return fmt.Errorf("shell execution failed: %w", err)
+		return fmt.Errorf("docker exec failed: %w", err)
 	}
 
 	return nil
+}
+
+func buildDockerExecArgs(containerID string, workDir string, envVars map[string]string, interactive bool, command []string) []string {
+	args := []string{"exec"}
+
+	if interactive {
+		args = append(args, "-it")
+	}
+
+	if workDir != "" {
+		args = append(args, "-w", workDir)
+	}
+
+	keys := make([]string, 0, len(envVars))
+	for key := range envVars {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		args = append(args, "-e", key+"="+envVars[key])
+	}
+
+	args = append(args, containerID)
+	args = append(args, command...)
+
+	return args
 }

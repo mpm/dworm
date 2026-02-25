@@ -11,6 +11,7 @@ A CLI tool that bridges your host machine and devcontainer environments, providi
 - **Git Credential Forwarding**: Push/pull to private repos using host's credential helpers
 - **Environment Variable Injection**: Pass environment variables from host to container
 - **Shell Access**: Interactive shell with all forwarding active
+- **One-shot Command Execution**: Run a command in the container and exit
 - **Daemon Mode**: Run in foreground for integration with other tools
 
 ## Requirements
@@ -79,6 +80,9 @@ dworm down
 
 # Open a shell in a running container
 dworm shell
+
+# Run a command in a running container and exit
+dworm exec -- npm test
 
 # Check container status
 dworm status
