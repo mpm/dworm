@@ -74,10 +74,11 @@ func DevcontainerDown(workspacePath string) error {
 		return fmt.Errorf("failed to find container: %w", err)
 	}
 
-	containerID := strings.TrimSpace(stdout.String())
-	if containerID == "" {
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) == 0 || lines[0] == "" {
 		return fmt.Errorf("no running container found for %s", workspacePath)
 	}
+	containerID := lines[0]
 
 	// Stop the container
 	stopCmd := exec.Command("docker", "stop", containerID)
@@ -118,12 +119,12 @@ func GetContainerID(workspacePath string) (string, error) {
 		return "", fmt.Errorf("failed to query containers: %w", err)
 	}
 
-	containerID := strings.TrimSpace(stdout.String())
-	if containerID == "" {
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) == 0 || lines[0] == "" {
 		return "", fmt.Errorf("no running container found for %s", workspacePath)
 	}
 
-	return containerID, nil
+	return lines[0], nil
 }
 
 // DevcontainerRemove stops and removes a devcontainer and optionally its image.
@@ -139,10 +140,11 @@ func DevcontainerRemove(workspacePath string, removeImage bool) error {
 		return fmt.Errorf("failed to find container: %w", err)
 	}
 
-	containerID := strings.TrimSpace(stdout.String())
-	if containerID == "" {
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) == 0 || lines[0] == "" {
 		return fmt.Errorf("no container found for %s", workspacePath)
 	}
+	containerID := lines[0]
 
 	// Get image ID before removing the container
 	var imageID string
