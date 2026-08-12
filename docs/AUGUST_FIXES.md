@@ -59,6 +59,8 @@ The scanner goroutine replaces and populates `Server.portAddresses` while tunnel
 
 **Priority:** High
 
+**Status:** Done
+
 When the endpoint process or yamux control channel fails, the host control goroutine only logs and exits. Host listeners remain active and continue accepting connections even though forwarding is unavailable.
 
 **Files:**

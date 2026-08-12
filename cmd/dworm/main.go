@@ -365,11 +365,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// Handle control messages
+	transportFailureCh := make(chan error, 1)
 	go func() {
 		for {
 			msgType, data, err := endpoint.RecvControl()
 			if err != nil {
-				logger.Printf("Control channel closed: %v", err)
+				transportErr := fmt.Errorf("endpoint transport failed: %w", err)
+				logger.Printf("Forwarding stopped: %v", transportErr)
+				tunnels.Close()
+				transportFailureCh <- transportErr
 				return
 			}
 
@@ -387,11 +391,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	if daemonMode {
 		logger.Printf("Running in daemon mode. Press Ctrl+C to stop.")
-		<-sigCh
-		logger.Printf("Shutting down...")
+		select {
+		case <-sigCh:
+			logger.Printf("Shutting down...")
+		case err = <-transportFailureCh:
+		}
 	} else {
 		// Start interactive shell with TUI
-		if err := tui.Run(
+		shellErr := tui.Run(
 			containerInfo.ContainerID,
 			containerInfo.ContainerName,
 			containerInfo.WorkspaceDir,
@@ -399,10 +406,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 			tuiPortUpdateCh,
 			logBuffer,
 			logUpdateCh,
-		); err != nil {
+			transportFailureCh,
+		)
+		if shellErr != nil {
 			// Check if it's just an exit code
-			if !strings.HasPrefix(err.Error(), "exit ") {
-				logger.Printf("Shell error: %v", err)
+			if !strings.HasPrefix(shellErr.Error(), "exit ") {
+				logger.Printf("Shell error: %v", shellErr)
+				if strings.HasPrefix(shellErr.Error(), "endpoint transport failed:") {
+					err = shellErr
+				}
 			}
 		}
 	}
@@ -413,7 +425,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	endpoint.Close()
 
-	return nil
+	return err
 }
 
 func runDown(cmd *cobra.Command, args []string) error {

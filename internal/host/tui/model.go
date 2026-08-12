@@ -44,6 +44,7 @@ type Model struct {
 	statusBar     *StatusBar
 	portUpdateCh  <-chan []PortMapping
 	logUpdateCh   <-chan struct{}
+	failureCh     <-chan error
 	logBuffer     *LogBuffer
 	outputMu      sync.Mutex
 	output        io.Writer
@@ -68,16 +69,17 @@ func New(containerID, containerName, workDir string, envVars map[string]string) 
 
 // Run starts the TUI session and blocks until it exits.
 // logBuffer and logUpdateCh may be nil if log routing is not enabled.
-func Run(containerID, containerName, workDir string, envVars map[string]string, portUpdateCh <-chan []PortMapping, logBuffer *LogBuffer, logUpdateCh <-chan struct{}) error {
+func Run(containerID, containerName, workDir string, envVars map[string]string, portUpdateCh <-chan []PortMapping, logBuffer *LogBuffer, logUpdateCh <-chan struct{}, failureCh <-chan error) error {
 	// Check if we have a TTY
 	if !IsTerminal(int(os.Stdin.Fd())) || !IsTerminal(int(os.Stdout.Fd())) {
-		return runFallback(containerID, containerName, workDir, envVars)
+		return runFallback(containerID, containerName, workDir, envVars, failureCh)
 	}
 
 	m := New(containerID, containerName, workDir, envVars)
 	m.portUpdateCh = portUpdateCh
 	m.logBuffer = logBuffer
 	m.logUpdateCh = logUpdateCh
+	m.failureCh = failureCh
 	return m.run()
 }
 
@@ -159,14 +161,17 @@ func (m *Model) run() error {
 		errCh <- nil
 	}()
 
-	// Wait for shell to exit
-	cmdErr := cmd.Wait()
+	// Wait for the shell or transport to exit.
+	cmdErr, failureErr := waitForCommand(cmd, m.failureCh)
 
 	// Signal done to all goroutines
 	close(m.doneCh)
 
 	// Clear status bar before exit
 	m.clearStatusBar()
+	if failureErr != nil {
+		return failureErr
+	}
 
 	if cmdErr != nil {
 		if exitErr, ok := cmdErr.(*exec.ExitError); ok {
@@ -192,6 +197,23 @@ func (m *Model) buildDockerCommand() *exec.Cmd {
 	args = append(args, m.containerID, "/bin/bash")
 
 	return exec.Command("docker", args...)
+}
+
+func waitForCommand(cmd *exec.Cmd, failureCh <-chan error) (error, error) {
+	cmdResult := make(chan error, 1)
+	go func() {
+		cmdResult <- cmd.Wait()
+	}()
+
+	select {
+	case cmdErr := <-cmdResult:
+		return cmdErr, nil
+	case failureErr := <-failureCh:
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return <-cmdResult, failureErr
+	}
 }
 
 func (m *Model) copyOutput() {

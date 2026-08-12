@@ -16,7 +16,7 @@ func IsTerminal(fd int) bool {
 }
 
 // runFallback runs the shell without the TUI (fallback for non-TTY)
-func runFallback(containerID, containerName, workDir string, envVars map[string]string) error {
+func runFallback(containerID, containerName, workDir string, envVars map[string]string, failureCh <-chan error) error {
 	cmd := buildDockerCommand(containerID, workDir, envVars)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -35,7 +35,15 @@ func runFallback(containerID, containerName, workDir string, envVars map[string]
 		}
 	}()
 
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	err, failureErr := waitForCommand(cmd, failureCh)
+	if failureErr != nil {
+		return failureErr
+	}
+	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return fmt.Errorf("exit %d", exitErr.ExitCode())
 		}
