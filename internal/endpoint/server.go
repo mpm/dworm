@@ -27,6 +27,7 @@ type Server struct {
 	gpgForwarder     *GPGForwarder
 	gitCredForwarder *GitCredForwarder
 	setupTimeout     time.Duration
+	sendControl      func(string, interface{}) error
 }
 
 // NewServer creates a new endpoint server
@@ -177,8 +178,12 @@ func (s *Server) scanAndReport() {
 		return
 	}
 
-	previousPorts, changed := s.updatePortState(ports)
-	if changed {
+	s.reportPorts(ports)
+}
+
+func (s *Server) reportPorts(ports []protocol.PortInfo) {
+	previousPorts := s.currentPortSnapshot()
+	if !reflect.DeepEqual(ports, previousPorts) {
 		added, removed := DiffPorts(previousPorts, ports)
 		if len(added) > 0 {
 			s.logger.Printf("New ports detected: %v", added)
@@ -187,13 +192,24 @@ func (s *Server) scanAndReport() {
 			s.logger.Printf("Ports closed: %v", removed)
 		}
 
-		// Send port update
-		if err := s.mux.SendControl(protocol.TypePortUpdate, &protocol.PortUpdateMessage{
+		sendControl := s.sendControl
+		if sendControl == nil {
+			sendControl = s.mux.SendControl
+		}
+		if err := sendControl(protocol.TypePortUpdate, &protocol.PortUpdateMessage{
 			Ports: ports,
 		}); err != nil {
 			s.logger.Printf("Failed to send port update: %v", err)
+			return
 		}
+		s.updatePortState(ports)
 	}
+}
+
+func (s *Server) currentPortSnapshot() []protocol.PortInfo {
+	s.portStateMu.RLock()
+	defer s.portStateMu.RUnlock()
+	return append([]protocol.PortInfo(nil), s.currentPorts...)
 }
 
 func (s *Server) updatePortState(ports []protocol.PortInfo) ([]protocol.PortInfo, bool) {

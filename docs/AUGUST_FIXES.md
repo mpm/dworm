@@ -113,6 +113,8 @@ Tunnel setup has no end-to-end deadline. The host can wait indefinitely for the 
 
 **Priority:** Medium
 
+**Status:** Done
+
 The endpoint records a new scan as current before confirming that its control message was sent. If sending fails, unchanged scans do not retry. Similarly, a transient host listener creation failure is only logged and is not retried until the container port set changes again.
 
 **Files:**

@@ -1,6 +1,7 @@
 package endpoint
 
 import (
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -94,5 +95,32 @@ func TestPortStatePublishesCompleteSnapshot(t *testing.T) {
 	}
 	if address, ok := server.portAddress(8080); !ok || address != "::1" {
 		t.Fatalf("port 8080 address = %q, %v; want ::1, true", address, ok)
+	}
+}
+
+func TestFailedPortUpdateIsRetried(t *testing.T) {
+	server := NewServer()
+	server.logger = log.New(io.Discard, "", 0)
+	ports := []protocol.PortInfo{{Port: 8080, Address: "127.0.0.1"}}
+
+	attempts := 0
+	server.sendControl = func(string, interface{}) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("temporary send failure")
+		}
+		return nil
+	}
+
+	server.reportPorts(ports)
+	if got := server.currentPortSnapshot(); len(got) != 0 {
+		t.Fatalf("failed update was committed: %v", got)
+	}
+	server.reportPorts(ports)
+	if attempts != 2 {
+		t.Fatalf("send attempts = %d, want 2", attempts)
+	}
+	if got := server.currentPortSnapshot(); len(got) != 1 || got[0] != ports[0] {
+		t.Fatalf("successful update was not committed: %v", got)
 	}
 }

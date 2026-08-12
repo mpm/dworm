@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/mpm/dworm/internal/protocol"
 )
@@ -23,6 +24,11 @@ type TunnelManager struct {
 	logger       *log.Logger
 	portUpdateCh chan<- []PortMapping
 	bindAddr     string
+	desiredPorts map[int]struct{}
+	retryTimers  map[int]*time.Timer
+	retryDelay   time.Duration
+	listen       func(string, string) (net.Listener, error)
+	closed       bool
 }
 
 // NewTunnelManager creates a new tunnel manager.
@@ -33,10 +39,14 @@ func NewTunnelManager(endpoint *EndpointManager, bindAddr string, logger *log.Lo
 		bindAddr = "127.0.0.1"
 	}
 	return &TunnelManager{
-		endpoint:  endpoint,
-		listeners: make(map[int]net.Listener),
-		logger:    logger,
-		bindAddr:  bindAddr,
+		endpoint:     endpoint,
+		listeners:    make(map[int]net.Listener),
+		logger:       logger,
+		bindAddr:     bindAddr,
+		desiredPorts: make(map[int]struct{}),
+		retryTimers:  make(map[int]*time.Timer),
+		retryDelay:   time.Second,
+		listen:       net.Listen,
 	}
 }
 
@@ -73,9 +83,12 @@ func (t *TunnelManager) notifyPortChange() {
 func (t *TunnelManager) ForwardPort(port int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.desiredPorts[port] = struct{}{}
 	err := t.forwardPortLocked(port)
 	if err == nil {
 		t.notifyPortChange()
+	} else {
+		t.scheduleRetryLocked(port)
 	}
 	return err
 }
@@ -88,10 +101,10 @@ func (t *TunnelManager) forwardPortLocked(port int) error {
 	}
 
 	// Try to bind to the same port on the configured address
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", t.bindAddr, port))
+	listener, err := t.listen("tcp", fmt.Sprintf("%s:%d", t.bindAddr, port))
 	if err != nil {
 		// Try a different port if the original is in use
-		listener, err = net.Listen("tcp", fmt.Sprintf("%s:0", t.bindAddr))
+		listener, err = t.listen("tcp", fmt.Sprintf("%s:0", t.bindAddr))
 		if err != nil {
 			return fmt.Errorf("failed to create listener: %w", err)
 		}
@@ -100,6 +113,10 @@ func (t *TunnelManager) forwardPortLocked(port int) error {
 	}
 
 	t.listeners[port] = listener
+	if timer := t.retryTimers[port]; timer != nil {
+		timer.Stop()
+		delete(t.retryTimers, port)
+	}
 	t.logger.Printf("Forwarding port %d -> container:%d", listener.Addr().(*net.TCPAddr).Port, port)
 
 	go t.acceptConnections(listener, port)
@@ -117,6 +134,8 @@ func (t *TunnelManager) StopForwarding(port int) error {
 		delete(t.listeners, port)
 		t.logger.Printf("Stopped forwarding port %d", port)
 	}
+	delete(t.desiredPorts, port)
+	t.cancelRetryLocked(port)
 
 	return nil
 }
@@ -131,6 +150,7 @@ func (t *TunnelManager) UpdatePorts(ports []protocol.PortInfo) {
 	for _, p := range ports {
 		newPortSet[p.Port] = struct{}{}
 	}
+	t.desiredPorts = newPortSet
 
 	// Remove ports that are no longer listening
 	for port, listener := range t.listeners {
@@ -140,12 +160,18 @@ func (t *TunnelManager) UpdatePorts(ports []protocol.PortInfo) {
 			t.logger.Printf("Stopped forwarding port %d", port)
 		}
 	}
+	for port := range t.retryTimers {
+		if _, exists := newPortSet[port]; !exists {
+			t.cancelRetryLocked(port)
+		}
+	}
 
 	// Add new ports (using internal method that doesn't acquire lock)
 	for _, p := range ports {
 		if _, exists := t.listeners[p.Port]; !exists {
 			if err := t.forwardPortLocked(p.Port); err != nil {
 				t.logger.Printf("Failed to forward port %d: %v", p.Port, err)
+				t.scheduleRetryLocked(p.Port)
 			}
 		}
 	}
@@ -172,10 +198,48 @@ func (t *TunnelManager) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	t.closed = true
+	for port := range t.retryTimers {
+		t.cancelRetryLocked(port)
+	}
 	for port, listener := range t.listeners {
 		listener.Close()
 		delete(t.listeners, port)
 		t.logger.Printf("Stopped forwarding port %d", port)
+	}
+}
+
+func (t *TunnelManager) scheduleRetryLocked(port int) {
+	if t.closed || t.retryTimers[port] != nil {
+		return
+	}
+	if _, desired := t.desiredPorts[port]; !desired {
+		return
+	}
+
+	t.retryTimers[port] = time.AfterFunc(t.retryDelay, func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		delete(t.retryTimers, port)
+		if t.closed {
+			return
+		}
+		if _, desired := t.desiredPorts[port]; !desired {
+			return
+		}
+		if err := t.forwardPortLocked(port); err != nil {
+			t.logger.Printf("Failed to retry port %d: %v", port, err)
+			t.scheduleRetryLocked(port)
+			return
+		}
+		t.notifyPortChange()
+	})
+}
+
+func (t *TunnelManager) cancelRetryLocked(port int) {
+	if timer := t.retryTimers[port]; timer != nil {
+		timer.Stop()
+		delete(t.retryTimers, port)
 	}
 }
 
