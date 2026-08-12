@@ -1,6 +1,8 @@
 package endpoint
 
 import (
+	"errors"
+	"io/fs"
 	"reflect"
 	"testing"
 
@@ -123,6 +125,34 @@ func TestParseProcNetLine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestScanListeningPortsAllowsUnavailableAddressFamily(t *testing.T) {
+	ports, err := scanListeningPorts(func(path string, ipv6 bool) ([]protocol.PortInfo, error) {
+		if ipv6 {
+			return nil, fs.ErrNotExist
+		}
+		return []protocol.PortInfo{{Port: 8080, Address: "0.0.0.0"}}, nil
+	})
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	if len(ports) != 1 || ports[0].Port != 8080 {
+		t.Fatalf("ports = %v, want IPv4 port 8080", ports)
+	}
+}
+
+func TestScanListeningPortsRejectsIncompleteSnapshot(t *testing.T) {
+	wantErr := errors.New("temporary proc failure")
+	_, err := scanListeningPorts(func(path string, ipv6 bool) ([]protocol.PortInfo, error) {
+		if ipv6 {
+			return nil, wantErr
+		}
+		return []protocol.PortInfo{{Port: 8080, Address: "0.0.0.0"}}, nil
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("scan error = %v, want %v", err, wantErr)
 	}
 }
 

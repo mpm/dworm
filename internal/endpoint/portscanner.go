@@ -3,7 +3,9 @@ package endpoint
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"sort"
@@ -21,6 +23,10 @@ const (
 
 // ScanListeningPorts returns a sorted list of ports that are listening with their bind addresses
 func ScanListeningPorts() ([]protocol.PortInfo, error) {
+	return scanListeningPorts(scanProcNetTCP)
+}
+
+func scanListeningPorts(scan func(string, bool) ([]protocol.PortInfo, error)) ([]protocol.PortInfo, error) {
 	// Use a map to track unique (port, address) pairs
 	type portKey struct {
 		port    int
@@ -28,10 +34,26 @@ func ScanListeningPorts() ([]protocol.PortInfo, error) {
 	}
 	seen := make(map[portKey]struct{})
 	var ports []protocol.PortInfo
+	availableFamilies := 0
 
-	// Scan IPv4
-	if ipv4Ports, err := scanProcNetTCP("/proc/net/tcp", false); err == nil {
-		for _, p := range ipv4Ports {
+	families := []struct {
+		path   string
+		ipv6   bool
+		family string
+	}{
+		{path: "/proc/net/tcp", family: "IPv4"},
+		{path: "/proc/net/tcp6", ipv6: true, family: "IPv6"},
+	}
+	for _, family := range families {
+		familyPorts, err := scan(family.path, family.ipv6)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("scan %s sockets: %w", family.family, err)
+		}
+		availableFamilies++
+		for _, p := range familyPorts {
 			key := portKey{p.Port, p.Address}
 			if _, exists := seen[key]; !exists {
 				seen[key] = struct{}{}
@@ -39,16 +61,8 @@ func ScanListeningPorts() ([]protocol.PortInfo, error) {
 			}
 		}
 	}
-
-	// Scan IPv6
-	if ipv6Ports, err := scanProcNetTCP("/proc/net/tcp6", true); err == nil {
-		for _, p := range ipv6Ports {
-			key := portKey{p.Port, p.Address}
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
-				ports = append(ports, p)
-			}
-		}
+	if availableFamilies == 0 {
+		return nil, fmt.Errorf("no TCP socket tables available")
 	}
 
 	// Sort by port number, then by address

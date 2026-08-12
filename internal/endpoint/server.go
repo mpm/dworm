@@ -28,6 +28,7 @@ type Server struct {
 	gitCredForwarder *GitCredForwarder
 	setupTimeout     time.Duration
 	sendControl      func(string, interface{}) error
+	scanPorts        func() ([]protocol.PortInfo, error)
 }
 
 // NewServer creates a new endpoint server
@@ -172,7 +173,11 @@ func (s *Server) runPortScanner() {
 }
 
 func (s *Server) scanAndReport() {
-	ports, err := ScanListeningPorts()
+	scanPorts := s.scanPorts
+	if scanPorts == nil {
+		scanPorts = ScanListeningPorts
+	}
+	ports, err := scanPorts()
 	if err != nil {
 		s.logger.Printf("Port scan error: %v", err)
 		return

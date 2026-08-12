@@ -137,6 +137,8 @@ The endpoint records a new scan as current before confirming that its control me
 
 **Priority:** Medium
 
+**Status:** Done
+
 Errors reading `/proc/net/tcp` and `/proc/net/tcp6` are currently ignored. An incomplete scan can be treated as a real removal and cause host listeners to be closed.
 
 **File:** `internal/endpoint/portscanner.go`

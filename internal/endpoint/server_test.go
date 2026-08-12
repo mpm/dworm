@@ -124,3 +124,26 @@ func TestFailedPortUpdateIsRetried(t *testing.T) {
 		t.Fatalf("successful update was not committed: %v", got)
 	}
 }
+
+func TestPortScanFailurePreservesCurrentSnapshot(t *testing.T) {
+	server := NewServer()
+	server.logger = log.New(io.Discard, "", 0)
+	wantPorts := []protocol.PortInfo{{Port: 8080, Address: "127.0.0.1"}}
+	server.updatePortState(wantPorts)
+	server.scanPorts = func() ([]protocol.PortInfo, error) {
+		return nil, errors.New("temporary proc failure")
+	}
+	sendCalled := false
+	server.sendControl = func(string, interface{}) error {
+		sendCalled = true
+		return nil
+	}
+
+	server.scanAndReport()
+	if sendCalled {
+		t.Fatal("scan failure published a port update")
+	}
+	if got := server.currentPortSnapshot(); len(got) != 1 || got[0] != wantPorts[0] {
+		t.Fatalf("snapshot changed after scan failure: %v", got)
+	}
+}
