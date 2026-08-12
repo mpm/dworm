@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mpm/dworm/internal/protocol"
@@ -18,6 +19,7 @@ import (
 type Server struct {
 	mux              *protocol.Mux
 	envVars          map[string]string
+	portStateMu      sync.RWMutex
 	currentPorts     []protocol.PortInfo
 	portAddresses    map[int]string // port -> best bind address for connecting
 	logger           *log.Logger
@@ -173,31 +175,14 @@ func (s *Server) scanAndReport() {
 		return
 	}
 
-	// Only report if changed
-	if !reflect.DeepEqual(ports, s.currentPorts) {
-		added, removed := DiffPorts(s.currentPorts, ports)
+	previousPorts, changed := s.updatePortState(ports)
+	if changed {
+		added, removed := DiffPorts(previousPorts, ports)
 		if len(added) > 0 {
 			s.logger.Printf("New ports detected: %v", added)
 		}
 		if len(removed) > 0 {
 			s.logger.Printf("Ports closed: %v", removed)
-		}
-
-		s.currentPorts = ports
-
-		// Build port -> address lookup map
-		// For ports with multiple addresses, prefer more connectable ones:
-		// 0.0.0.0 > specific IP > 127.0.0.1 (IPv4)
-		// :: > specific IP > ::1 (IPv6)
-		s.portAddresses = make(map[int]string)
-		for _, p := range ports {
-			existing, hasExisting := s.portAddresses[p.Port]
-			if !hasExisting {
-				s.portAddresses[p.Port] = p.Address
-			} else {
-				// Prefer the more "connectable" address
-				s.portAddresses[p.Port] = preferAddress(existing, p.Address)
-			}
 		}
 
 		// Send port update
@@ -207,6 +192,36 @@ func (s *Server) scanAndReport() {
 			s.logger.Printf("Failed to send port update: %v", err)
 		}
 	}
+}
+
+func (s *Server) updatePortState(ports []protocol.PortInfo) ([]protocol.PortInfo, bool) {
+	addresses := make(map[int]string)
+	for _, p := range ports {
+		existing, ok := addresses[p.Port]
+		if !ok {
+			addresses[p.Port] = p.Address
+		} else {
+			addresses[p.Port] = preferAddress(existing, p.Address)
+		}
+	}
+
+	s.portStateMu.Lock()
+	defer s.portStateMu.Unlock()
+	if reflect.DeepEqual(ports, s.currentPorts) {
+		return nil, false
+	}
+
+	previousPorts := s.currentPorts
+	s.currentPorts = ports
+	s.portAddresses = addresses
+	return previousPorts, true
+}
+
+func (s *Server) portAddress(port int) (string, bool) {
+	s.portStateMu.RLock()
+	defer s.portStateMu.RUnlock()
+	address, ok := s.portAddresses[port]
+	return address, ok
 }
 
 // preferAddress returns the address that's more likely to be connectable
@@ -256,7 +271,7 @@ func (s *Server) handleTunnelStream(stream net.Conn) {
 	port := int(portBuf[0])<<24 | int(portBuf[1])<<16 | int(portBuf[2])<<8 | int(portBuf[3])
 
 	// Look up the bind address for this port
-	bindAddr, ok := s.portAddresses[port]
+	bindAddr, ok := s.portAddress(port)
 	if !ok {
 		// Fallback to localhost if port not in our map (shouldn't happen normally)
 		bindAddr = "127.0.0.1"

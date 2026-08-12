@@ -38,6 +38,8 @@ This is the strongest explanation for stale browser connections, leaked streams,
 
 **Priority:** High
 
+**Status:** Done
+
 The scanner goroutine replaces and populates `Server.portAddresses` while tunnel-handler goroutines read it without synchronization. This is a data race and can expose empty, partial, or stale routing state. A fatal concurrent-map failure would also kill the endpoint.
 
 **File:** `internal/endpoint/server.go`
