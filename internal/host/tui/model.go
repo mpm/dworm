@@ -52,6 +52,7 @@ type Model struct {
 	doneCh        chan struct{}
 	width         int
 	height        int
+	ansiPending   []byte
 }
 
 // New creates a new TUI model
@@ -105,7 +106,7 @@ func (m *Model) run() error {
 	cmd := m.buildDockerCommand()
 
 	// Calculate shell height (leave room for status bar)
-	shellHeight := height - m.statusBar.Height()
+	shellHeight := calculateShellHeight(height, m.statusBar.Height())
 
 	// Start with PTY
 	m.ptmx, err = pty.StartWithSize(cmd, &pty.Winsize{
@@ -207,24 +208,11 @@ func (m *Model) copyOutput() {
 			return
 		}
 		if n > 0 {
-			data := buf[:n]
-			m.write(data)
-
-			// Check if output contains a clear screen sequence
-			if m.containsClearSequence(data) {
+			if m.writePTYOutput(buf[:n]) {
 				m.renderStatusBar()
 			}
 		}
 	}
-}
-
-func (m *Model) containsClearSequence(data []byte) bool {
-	for _, seq := range clearSequences {
-		if bytes.Contains(data, seq) {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *Model) handleInput() {
@@ -311,16 +299,8 @@ func (m *Model) handleResize() {
 
 	// Update status bar dimensions
 	m.statusBar.SetSize(width, height)
-	shellHeight := height - m.statusBar.Height()
-
-	// Update scroll region
-	m.outputMu.Lock()
-	fmt.Fprint(m.output, setScrollRegion(1, shellHeight))
-	for row := shellHeight + 1; row <= height; row++ {
-		fmt.Fprint(m.output, moveToRow(row))
-		fmt.Fprint(m.output, clearLine)
-	}
-	m.outputMu.Unlock()
+	shellHeight := calculateShellHeight(height, m.statusBar.Height())
+	m.updateTerminalLayout(shellHeight, height)
 
 	// Resize PTY
 	pty.Setsize(m.ptmx, &pty.Winsize{
@@ -341,16 +321,8 @@ func (m *Model) resizeAndRender() {
 	m.height = height
 
 	m.statusBar.SetSize(width, height)
-	shellHeight := height - m.statusBar.Height()
-
-	// Update scroll region
-	m.outputMu.Lock()
-	fmt.Fprint(m.output, setScrollRegion(1, shellHeight))
-	for row := shellHeight + 1; row <= height; row++ {
-		fmt.Fprint(m.output, moveToRow(row))
-		fmt.Fprint(m.output, clearLine)
-	}
-	m.outputMu.Unlock()
+	shellHeight := calculateShellHeight(height, m.statusBar.Height())
+	m.updateTerminalLayout(shellHeight, height)
 
 	// Resize PTY
 	pty.Setsize(m.ptmx, &pty.Winsize{
@@ -433,6 +405,144 @@ func (m *Model) clearScreen(shellHeight, totalHeight int) {
 	}
 	// Move cursor to top-left
 	fmt.Fprint(m.output, moveTo(1, 1))
+}
+
+func (m *Model) updateTerminalLayout(shellHeight, totalHeight int) {
+	m.outputMu.Lock()
+	defer m.outputMu.Unlock()
+
+	fmt.Fprint(m.output, setScrollRegion(1, shellHeight))
+	for row := shellHeight + 1; row <= totalHeight; row++ {
+		fmt.Fprint(m.output, moveToRow(row))
+		fmt.Fprint(m.output, clearLine)
+	}
+	// The old cursor may be below a newly shortened region. Always finish inside
+	// the shell area so subsequent newlines can scroll instead of one-line looping.
+	fmt.Fprint(m.output, moveToRow(shellHeight))
+}
+
+func calculateShellHeight(totalHeight, statusHeight int) int {
+	shellHeight := totalHeight - statusHeight
+	if shellHeight < 1 {
+		return 1
+	}
+	return shellHeight
+}
+
+// writePTYOutput keeps incomplete ANSI sequences together and repairs terminal
+// state that child applications assume applies to their smaller PTY viewport.
+func (m *Model) writePTYOutput(data []byte) bool {
+	m.outputMu.Lock()
+	defer m.outputMu.Unlock()
+
+	data = append(m.ansiPending, data...)
+	m.ansiPending = nil
+
+	complete, pending := splitCompleteANSI(data)
+	if len(pending) > 4096 {
+		complete = append(complete, pending)
+	} else {
+		m.ansiPending = append(m.ansiPending, pending...)
+	}
+
+	redraw := false
+	for _, part := range complete {
+		if bytes.Equal(part, []byte(resetScrollRegion)) {
+			fmt.Fprint(m.output, setScrollRegion(1, calculateShellHeight(m.height, m.statusBar.Height())))
+			redraw = true
+			continue
+		}
+
+		m.output.Write(part)
+		if repairsTerminalState(part) {
+			fmt.Fprint(m.output, setScrollRegion(1, calculateShellHeight(m.height, m.statusBar.Height())))
+			redraw = true
+		}
+		if isClearSequence(part) {
+			redraw = true
+		}
+	}
+	return redraw
+}
+
+func repairsTerminalState(part []byte) bool {
+	if bytes.Equal(part, []byte("\x1bc")) {
+		return true
+	}
+	return bytes.Equal(part, []byte("\x1b[?1049h")) ||
+		bytes.Equal(part, []byte("\x1b[?1049l")) ||
+		bytes.Equal(part, []byte("\x1b[?47h")) ||
+		bytes.Equal(part, []byte("\x1b[?47l")) ||
+		bytes.Equal(part, []byte("\x1b[?1047h")) ||
+		bytes.Equal(part, []byte("\x1b[?1047l"))
+}
+
+func isClearSequence(part []byte) bool {
+	for _, seq := range clearSequences {
+		if bytes.Equal(part, seq) {
+			return true
+		}
+	}
+	return false
+}
+
+func splitCompleteANSI(data []byte) ([][]byte, []byte) {
+	parts := make([][]byte, 0, 4)
+	plainStart := 0
+	for i := 0; i < len(data); {
+		if data[i] != '\x1b' {
+			i++
+			continue
+		}
+		if i > plainStart {
+			parts = append(parts, data[plainStart:i])
+		}
+
+		end := ansiSequenceEnd(data, i)
+		if end == 0 {
+			return parts, data[i:]
+		}
+		parts = append(parts, data[i:end])
+		i = end
+		plainStart = i
+	}
+	if plainStart < len(data) {
+		parts = append(parts, data[plainStart:])
+	}
+	return parts, nil
+}
+
+func ansiSequenceEnd(data []byte, start int) int {
+	if start+1 >= len(data) {
+		return 0
+	}
+
+	switch data[start+1] {
+	case '[':
+		for i := start + 2; i < len(data); i++ {
+			if data[i] >= 0x40 && data[i] <= 0x7e {
+				return i + 1
+			}
+		}
+		return 0
+	case ']', 'P', '^', '_':
+		for i := start + 2; i < len(data); i++ {
+			if data[i] == '\a' {
+				return i + 1
+			}
+			if data[i] == '\x1b' && i+1 < len(data) && data[i+1] == '\\' {
+				return i + 2
+			}
+		}
+		return 0
+	default:
+		for i := start + 1; i < len(data); i++ {
+			if data[i] >= 0x30 && data[i] <= 0x7e {
+				return i + 1
+			}
+		}
+		return 0
+	}
 }
 
 func (m *Model) write(data []byte) {
