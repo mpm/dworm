@@ -86,7 +86,7 @@ func (e *EndpointManager) InjectAndStart(endpointBinaryPath string) error {
 		writer: stdin,
 	}
 
-	e.mux, err = protocol.NewClientMux(rwc)
+	e.mux, err = protocol.NewClientMux(rwc, e.logger)
 	if err != nil {
 		e.cmd.Process.Kill()
 		return fmt.Errorf("failed to create mux: %w", err)

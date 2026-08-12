@@ -51,7 +51,7 @@ func (s *Server) Run() error {
 	}
 
 	var err error
-	s.mux, err = protocol.NewServerMux(rwc)
+	s.mux, err = protocol.NewServerMux(rwc, s.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create mux: %w", err)
 	}

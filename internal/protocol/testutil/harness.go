@@ -3,6 +3,7 @@ package testutil
 
 import (
 	"io"
+	"log"
 	"sync"
 
 	"github.com/mpm/dworm/internal/protocol"
@@ -59,13 +60,13 @@ func NewTestHarness() (*TestHarness, error) {
 	// Create host mux (client mode) in goroutine
 	go func() {
 		defer wg.Done()
-		hostMux, hostErr = protocol.NewClientMux(hostRWC)
+		hostMux, hostErr = protocol.NewClientMux(hostRWC, log.New(io.Discard, "", 0))
 	}()
 
 	// Create endpoint mux (server mode) in goroutine
 	go func() {
 		defer wg.Done()
-		endpointMux, endpointErr = protocol.NewServerMux(endpointRWC)
+		endpointMux, endpointErr = protocol.NewServerMux(endpointRWC, log.New(io.Discard, "", 0))
 	}()
 
 	wg.Wait()

@@ -8,6 +8,8 @@ This document tracks the networking reliability work identified during the Augus
 
 **Status:** Done
 
+**Commit:** `67dd8a5` (`Fix tunnel half-close handling`)
+
 `protocol.BiProxy` propagates EOF with `CloseWrite`, but `*yamux.Stream` does not implement `CloseWrite`. It then waits for both copy directions before returning and closing the stream. When either TCP peer closes first, the remaining copy can stay blocked indefinitely.
 
 This is the strongest explanation for stale browser connections, leaked streams, and gradual degradation after idle periods or server restarts.
@@ -40,6 +42,8 @@ This is the strongest explanation for stale browser connections, leaked streams,
 
 **Status:** Done
 
+**Commit:** `da9d34c` (`Synchronize endpoint port state`)
+
 The scanner goroutine replaces and populates `Server.portAddresses` while tunnel-handler goroutines read it without synchronization. This is a data race and can expose empty, partial, or stale routing state. A fatal concurrent-map failure would also kill the endpoint.
 
 **File:** `internal/endpoint/server.go`
@@ -60,6 +64,8 @@ The scanner goroutine replaces and populates `Server.portAddresses` while tunnel
 **Priority:** High
 
 **Status:** Done
+
+**Commit:** `52bfc5c` (`Stop forwarding on endpoint failure`)
 
 When the endpoint process or yamux control channel fails, the host control goroutine only logs and exits. Host listeners remain active and continue accepting connections even though forwarding is unavailable.
 
@@ -89,6 +95,8 @@ When the endpoint process or yamux control channel fails, the host control gorou
 
 **Status:** Done
 
+**Commit:** `24e277b` (`Add tunnel setup deadlines`)
+
 Tunnel setup has no end-to-end deadline. The host can wait indefinitely for the endpoint response, and the endpoint uses an unbounded `net.Dial` call.
 
 **Files:**
@@ -115,6 +123,8 @@ Tunnel setup has no end-to-end deadline. The host can wait indefinitely for the 
 
 **Status:** Done
 
+**Commit:** `64c12b2` (`Retry failed port updates`)
+
 The endpoint records a new scan as current before confirming that its control message was sent. If sending fails, unchanged scans do not retry. Similarly, a transient host listener creation failure is only logged and is not retried until the container port set changes again.
 
 **Files:**
@@ -139,6 +149,8 @@ The endpoint records a new scan as current before confirming that its control me
 
 **Status:** Done
 
+**Commit:** `e86aa03` (`Preserve ports on scanner errors`)
+
 Errors reading `/proc/net/tcp` and `/proc/net/tcp6` are currently ignored. An incomplete scan can be treated as a real removal and cause host listeners to be closed.
 
 **File:** `internal/endpoint/portscanner.go`
@@ -160,6 +172,8 @@ Errors reading `/proc/net/tcp` and `/proc/net/tcp6` are currently ignored. An in
 
 **Status:** Done
 
+**Commit:** `043ebda` (`Close tunnels when ports disappear`)
+
 Removing a forwarded port closes only its host listener. Existing accepted connections remain active and may point to a stopped or replaced development server.
 
 **File:** `internal/host/tunnel.go`
@@ -178,6 +192,10 @@ Removing a forwarded port closes only its host listener. Existing accepted conne
 ## 8. Improve Yamux Diagnostics
 
 **Priority:** Medium
+
+**Status:** Done
+
+**Commit:** This commit (`Improve yamux diagnostics`)
 
 Yamux logging is currently sent to `io.Discard`, hiding keepalive failures, protocol errors, backlog exhaustion, and stream-open failures.
 

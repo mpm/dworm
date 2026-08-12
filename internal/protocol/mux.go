@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 
@@ -20,9 +21,8 @@ type Mux struct {
 }
 
 // NewServerMux creates a multiplexer in server mode (endpoint side)
-func NewServerMux(rwc io.ReadWriteCloser) (*Mux, error) {
-	config := yamux.DefaultConfig()
-	config.LogOutput = io.Discard
+func NewServerMux(rwc io.ReadWriteCloser, logger *log.Logger) (*Mux, error) {
+	config := newYamuxConfig(logger)
 
 	session, err := yamux.Server(rwc, config)
 	if err != nil {
@@ -44,9 +44,8 @@ func NewServerMux(rwc io.ReadWriteCloser) (*Mux, error) {
 }
 
 // NewClientMux creates a multiplexer in client mode (host side)
-func NewClientMux(rwc io.ReadWriteCloser) (*Mux, error) {
-	config := yamux.DefaultConfig()
-	config.LogOutput = io.Discard
+func NewClientMux(rwc io.ReadWriteCloser, logger *log.Logger) (*Mux, error) {
+	config := newYamuxConfig(logger)
 
 	session, err := yamux.Client(rwc, config)
 	if err != nil {
@@ -65,6 +64,13 @@ func NewClientMux(rwc io.ReadWriteCloser) (*Mux, error) {
 		controlConn: controlConn,
 		reader:      bufio.NewReader(controlConn),
 	}, nil
+}
+
+func newYamuxConfig(logger *log.Logger) *yamux.Config {
+	config := yamux.DefaultConfig()
+	config.LogOutput = nil
+	config.Logger = logger
+	return config
 }
 
 // SendControl sends a control message over the control channel
