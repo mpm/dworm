@@ -45,3 +45,55 @@ func TestTunnelManagerRetriesListenerCreation(t *testing.T) {
 	}
 	t.Fatal("listener was not created after transient failure")
 }
+
+func TestTunnelManagerClosesActiveConnectionsWhenPortDisappears(t *testing.T) {
+	manager := NewTunnelManager(nil, "127.0.0.1", log.New(io.Discard, "", 0))
+	defer manager.Close()
+	const port = 18080
+	manager.mu.Lock()
+	manager.desiredPorts[port] = struct{}{}
+	manager.mu.Unlock()
+
+	proxyConn, peerConn := net.Pipe()
+	defer peerConn.Close()
+	if !manager.registerConnection(port, proxyConn) {
+		t.Fatal("failed to register active connection")
+	}
+
+	manager.UpdatePorts(nil)
+	if _, err := peerConn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("active connection did not report EOF after port removal")
+	}
+}
+
+func TestTunnelManagerConnectionCompletionUnregistersSafely(t *testing.T) {
+	manager := NewTunnelManager(nil, "127.0.0.1", log.New(io.Discard, "", 0))
+	defer manager.Close()
+	const port = 18080
+	manager.mu.Lock()
+	manager.desiredPorts[port] = struct{}{}
+	manager.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for range 100 {
+		proxyConn, peerConn := net.Pipe()
+		if !manager.registerConnection(port, proxyConn) {
+			t.Fatal("failed to register active connection")
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			manager.unregisterConnection(port, proxyConn)
+			proxyConn.Close()
+			peerConn.Close()
+		}()
+	}
+	manager.UpdatePorts(nil)
+	wg.Wait()
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.activeConns) != 0 {
+		t.Fatalf("active connections not cleared: %v", manager.activeConns)
+	}
+}

@@ -158,6 +158,8 @@ Errors reading `/proc/net/tcp` and `/proc/net/tcp6` are currently ignored. An in
 
 **Priority:** Medium
 
+**Status:** Done
+
 Removing a forwarded port closes only its host listener. Existing accepted connections remain active and may point to a stopped or replaced development server.
 
 **File:** `internal/host/tunnel.go`

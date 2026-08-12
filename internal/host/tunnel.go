@@ -29,6 +29,7 @@ type TunnelManager struct {
 	retryDelay   time.Duration
 	listen       func(string, string) (net.Listener, error)
 	closed       bool
+	activeConns  map[int]map[net.Conn]struct{}
 }
 
 // NewTunnelManager creates a new tunnel manager.
@@ -47,6 +48,7 @@ func NewTunnelManager(endpoint *EndpointManager, bindAddr string, logger *log.Lo
 		retryTimers:  make(map[int]*time.Timer),
 		retryDelay:   time.Second,
 		listen:       net.Listen,
+		activeConns:  make(map[int]map[net.Conn]struct{}),
 	}
 }
 
@@ -127,7 +129,6 @@ func (t *TunnelManager) forwardPortLocked(port int) error {
 // StopForwarding stops forwarding a port
 func (t *TunnelManager) StopForwarding(port int) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	if listener, exists := t.listeners[port]; exists {
 		listener.Close()
@@ -136,6 +137,9 @@ func (t *TunnelManager) StopForwarding(port int) error {
 	}
 	delete(t.desiredPorts, port)
 	t.cancelRetryLocked(port)
+	connections := t.takeActiveLocked(port)
+	t.mu.Unlock()
+	closeConnections(connections)
 
 	return nil
 }
@@ -143,7 +147,7 @@ func (t *TunnelManager) StopForwarding(port int) error {
 // UpdatePorts updates the forwarded ports based on what's listening in the container
 func (t *TunnelManager) UpdatePorts(ports []protocol.PortInfo) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	var connectionsToClose []net.Conn
 
 	// Build set of new ports for quick lookup (by port number only)
 	newPortSet := make(map[int]struct{})
@@ -157,7 +161,13 @@ func (t *TunnelManager) UpdatePorts(ports []protocol.PortInfo) {
 		if _, exists := newPortSet[port]; !exists {
 			listener.Close()
 			delete(t.listeners, port)
+			connectionsToClose = append(connectionsToClose, t.takeActiveLocked(port)...)
 			t.logger.Printf("Stopped forwarding port %d", port)
+		}
+	}
+	for port := range t.activeConns {
+		if _, exists := newPortSet[port]; !exists {
+			connectionsToClose = append(connectionsToClose, t.takeActiveLocked(port)...)
 		}
 	}
 	for port := range t.retryTimers {
@@ -178,6 +188,8 @@ func (t *TunnelManager) UpdatePorts(ports []protocol.PortInfo) {
 
 	// Notify about the port change
 	t.notifyPortChange()
+	t.mu.Unlock()
+	closeConnections(connectionsToClose)
 }
 
 // GetForwardedPorts returns a map of container port -> local port
@@ -196,17 +208,22 @@ func (t *TunnelManager) GetForwardedPorts() map[int]int {
 // Close stops all port forwarding
 func (t *TunnelManager) Close() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	t.closed = true
 	for port := range t.retryTimers {
 		t.cancelRetryLocked(port)
 	}
+	var connectionsToClose []net.Conn
 	for port, listener := range t.listeners {
 		listener.Close()
 		delete(t.listeners, port)
 		t.logger.Printf("Stopped forwarding port %d", port)
 	}
+	for port := range t.activeConns {
+		connectionsToClose = append(connectionsToClose, t.takeActiveLocked(port)...)
+	}
+	t.mu.Unlock()
+	closeConnections(connectionsToClose)
 }
 
 func (t *TunnelManager) scheduleRetryLocked(port int) {
@@ -243,6 +260,50 @@ func (t *TunnelManager) cancelRetryLocked(port int) {
 	}
 }
 
+func (t *TunnelManager) registerConnection(port int, conn net.Conn) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return false
+	}
+	if _, desired := t.desiredPorts[port]; !desired {
+		return false
+	}
+	connections := t.activeConns[port]
+	if connections == nil {
+		connections = make(map[net.Conn]struct{})
+		t.activeConns[port] = connections
+	}
+	connections[conn] = struct{}{}
+	return true
+}
+
+func (t *TunnelManager) unregisterConnection(port int, conn net.Conn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	connections := t.activeConns[port]
+	delete(connections, conn)
+	if len(connections) == 0 {
+		delete(t.activeConns, port)
+	}
+}
+
+func (t *TunnelManager) takeActiveLocked(port int) []net.Conn {
+	connections := t.activeConns[port]
+	delete(t.activeConns, port)
+	result := make([]net.Conn, 0, len(connections))
+	for conn := range connections {
+		result = append(result, conn)
+	}
+	return result
+}
+
+func closeConnections(connections []net.Conn) {
+	for _, conn := range connections {
+		conn.Close()
+	}
+}
+
 func (t *TunnelManager) acceptConnections(listener net.Listener, containerPort int) {
 	for {
 		conn, err := listener.Accept()
@@ -251,12 +312,17 @@ func (t *TunnelManager) acceptConnections(listener net.Listener, containerPort i
 			return
 		}
 
+		if !t.registerConnection(containerPort, conn) {
+			conn.Close()
+			continue
+		}
 		go t.handleConnection(conn, containerPort)
 	}
 }
 
 func (t *TunnelManager) handleConnection(localConn net.Conn, containerPort int) {
 	defer localConn.Close()
+	defer t.unregisterConnection(containerPort, localConn)
 
 	// Open tunnel stream to endpoint
 	remoteConn, err := t.endpoint.OpenTunnelStream(containerPort)
@@ -265,6 +331,10 @@ func (t *TunnelManager) handleConnection(localConn net.Conn, containerPort int) 
 		return
 	}
 	defer remoteConn.Close()
+	if !t.registerConnection(containerPort, remoteConn) {
+		return
+	}
+	defer t.unregisterConnection(containerPort, remoteConn)
 
 	// Proxy data bidirectionally
 	if err := protocol.BiProxy(localConn, remoteConn); err != nil {
