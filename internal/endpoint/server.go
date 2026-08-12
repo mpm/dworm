@@ -293,7 +293,9 @@ func (s *Server) handleTunnelStream(stream net.Conn) {
 	stream.Write([]byte{1}) // 1 = success
 
 	// Proxy data bidirectionally
-	protocol.BiProxy(stream, localConn)
+	if err := protocol.BiProxy(stream, localConn); err != nil {
+		s.logger.Printf("Tunnel for port %d closed with error: %v", port, err)
+	}
 }
 
 func (s *Server) handleControlMessages() error {

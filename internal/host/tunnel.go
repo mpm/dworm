@@ -203,5 +203,7 @@ func (t *TunnelManager) handleConnection(localConn net.Conn, containerPort int) 
 	defer remoteConn.Close()
 
 	// Proxy data bidirectionally
-	protocol.BiProxy(localConn, remoteConn)
+	if err := protocol.BiProxy(localConn, remoteConn); err != nil {
+		t.logger.Printf("Tunnel to port %d closed with error: %v", containerPort, err)
+	}
 }

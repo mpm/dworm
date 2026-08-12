@@ -34,18 +34,18 @@ func TestAgentHandlerSSH(t *testing.T) {
 	testData := []byte("hello agent")
 
 	// Start mock agent - reads exact amount, echoes, then closes
-	var mockAgentConn net.Conn
+	mockAgentConn := make(chan net.Conn, 1)
 	mockAgentDone := make(chan struct{})
 	go func() {
 		defer close(mockAgentDone)
-		var err error
-		mockAgentConn, err = listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
+		mockAgentConn <- conn
 		buf := make([]byte, len(testData))
-		io.ReadFull(mockAgentConn, buf)
-		mockAgentConn.Write(buf)
+		io.ReadFull(conn, buf)
+		conn.Write(buf)
 	}()
 
 	// Create test harness
@@ -99,9 +99,7 @@ func TestAgentHandlerSSH(t *testing.T) {
 	}
 
 	// Close mock agent connection to clean up
-	if mockAgentConn != nil {
-		mockAgentConn.Close()
-	}
+	(<-mockAgentConn).Close()
 	<-mockAgentDone
 }
 
@@ -123,18 +121,18 @@ func TestAgentHandlerGPG(t *testing.T) {
 	defer listener.Close()
 
 	// Start mock agent - just accepts and waits
-	var mockAgentConn net.Conn
+	mockAgentConn := make(chan net.Conn, 1)
 	mockAgentDone := make(chan struct{})
 	go func() {
 		defer close(mockAgentDone)
-		var err error
-		mockAgentConn, err = listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
+		mockAgentConn <- conn
 		// Just wait for close
 		buf := make([]byte, 1)
-		mockAgentConn.Read(buf) // Will return when closed
+		conn.Read(buf) // Will return when closed
 	}()
 
 	// Create test harness
@@ -174,9 +172,7 @@ func TestAgentHandlerGPG(t *testing.T) {
 	}
 
 	// Close mock agent connection to clean up
-	if mockAgentConn != nil {
-		mockAgentConn.Close()
-	}
+	(<-mockAgentConn).Close()
 	<-mockAgentDone
 }
 

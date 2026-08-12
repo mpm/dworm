@@ -1,38 +1,51 @@
 package protocol
 
 import (
+	"errors"
 	"io"
 	"net"
 )
 
 // BiProxy copies data bidirectionally between two connections.
-// It waits for BOTH directions to complete before returning.
-// When one direction finishes, it closes the write side of the other
-// connection to signal EOF and allow graceful shutdown.
-func BiProxy(conn1, conn2 net.Conn) {
-	done := make(chan struct{}, 2)
+// EOF is propagated with a half-close where available. yamux streams implement
+// Close as a write-side FIN while continuing to permit reads, so Close is the
+// fallback for connections without CloseWrite.
+func BiProxy(conn1, conn2 net.Conn) error {
+	errs := make(chan error, 2)
 
 	go func() {
-		io.Copy(conn1, conn2)
-		// Signal EOF to conn1 reader by closing write side
-		if c, ok := conn1.(interface{ CloseWrite() error }); ok {
-			c.CloseWrite()
+		_, err := io.Copy(conn1, conn2)
+		if err == nil {
+			err = closeWrite(conn1)
 		}
-		done <- struct{}{}
+		errs <- err
 	}()
 
 	go func() {
-		io.Copy(conn2, conn1)
-		// Signal EOF to conn2 reader by closing write side
-		if c, ok := conn2.(interface{ CloseWrite() error }); ok {
-			c.CloseWrite()
+		_, err := io.Copy(conn2, conn1)
+		if err == nil {
+			err = closeWrite(conn2)
 		}
-		done <- struct{}{}
+		errs <- err
 	}()
 
-	// Wait for BOTH directions to complete
-	<-done
-	<-done
+	firstErr := <-errs
+	if firstErr != nil {
+		// A copy failure is not a graceful half-close. Tear down both sides so
+		// the opposite copy cannot remain blocked indefinitely.
+		conn1.Close()
+		conn2.Close()
+	}
+	secondErr := <-errs
+
+	return errors.Join(firstErr, secondErr)
+}
+
+func closeWrite(conn net.Conn) error {
+	if conn, ok := conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return conn.Close()
 }
 
 // BiProxyReadWriter copies data bidirectionally between two ReadWriters.
