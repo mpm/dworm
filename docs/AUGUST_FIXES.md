@@ -216,6 +216,10 @@ Yamux logging is currently sent to `io.Discard`, hiding keepalive failures, prot
 
 **Priority:** Required alongside the fixes above
 
+**Status:** Done
+
+**Commit:** This commit (`Expand networking reliability tests`)
+
 The current E2E test performs one request against a newly started server. There are no focused tests for `BiProxy`, `TunnelManager`, endpoint tunnel handling, idle connections, or restart behavior.
 
 **Files:**

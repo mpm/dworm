@@ -82,7 +82,7 @@ run_test() {
 
     if [[ ! -x "$test_path" ]]; then
         log_error "Test script not found or not executable: $test_script"
-        ((FAILED++))
+        ((FAILED += 1))
         return
     fi
 
@@ -91,12 +91,12 @@ run_test() {
 
     if "$test_path"; then
         log_pass "$test_script"
-        ((PASSED++))
+        ((PASSED += 1))
     elif [[ $? -eq 77 ]]; then
         log_skip "$test_script"
-        ((SKIPPED++))
+        ((SKIPPED += 1))
     else
         log_fail "$test_script"
-        ((FAILED++))
+        ((FAILED += 1))
     fi
 }
