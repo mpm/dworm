@@ -26,6 +26,7 @@ type Server struct {
 	agentForwarder   *AgentForwarder
 	gpgForwarder     *GPGForwarder
 	gitCredForwarder *GitCredForwarder
+	setupTimeout     time.Duration
 }
 
 // NewServer creates a new endpoint server
@@ -33,6 +34,7 @@ func NewServer() *Server {
 	return &Server{
 		logger:        log.New(protocol.NewCRWriter(os.Stderr), "[endpoint] ", log.LstdFlags),
 		portAddresses: make(map[int]string),
+		setupTimeout:  protocol.TunnelSetupTimeout,
 	}
 }
 
@@ -260,6 +262,14 @@ func (s *Server) acceptTunnelStreams() {
 
 func (s *Server) handleTunnelStream(stream net.Conn) {
 	defer stream.Close()
+	setupTimeout := s.setupTimeout
+	if setupTimeout == 0 {
+		setupTimeout = protocol.TunnelSetupTimeout
+	}
+	if err := stream.SetDeadline(time.Now().Add(setupTimeout)); err != nil {
+		s.logger.Printf("Failed to set tunnel setup deadline: %v", err)
+		return
+	}
 
 	// Read tunnel request header (4 bytes for port)
 	portBuf := make([]byte, 4)
@@ -295,17 +305,27 @@ func (s *Server) handleTunnelStream(stream net.Conn) {
 	}
 
 	// Connect to local port
-	localConn, err := net.Dial("tcp", dialAddr)
+	dialer := net.Dialer{Timeout: setupTimeout}
+	localConn, err := dialer.Dial("tcp", dialAddr)
 	if err != nil {
 		s.logger.Printf("Failed to connect to local port %d (%s): %v", port, dialAddr, err)
 		// Send error response
-		stream.Write([]byte{0}) // 0 = failure
+		if _, writeErr := stream.Write([]byte{0}); writeErr != nil {
+			s.logger.Printf("Failed to send tunnel failure for port %d: %v", port, writeErr)
+		}
 		return
 	}
 	defer localConn.Close()
 
 	// Send success response
-	stream.Write([]byte{1}) // 1 = success
+	if _, err := stream.Write([]byte{1}); err != nil {
+		s.logger.Printf("Failed to send tunnel success for port %d: %v", port, err)
+		return
+	}
+	if err := stream.SetDeadline(time.Time{}); err != nil {
+		s.logger.Printf("Failed to clear tunnel setup deadline for port %d: %v", port, err)
+		return
+	}
 
 	// Proxy data bidirectionally
 	if err := protocol.BiProxy(stream, localConn); err != nil {

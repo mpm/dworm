@@ -85,6 +85,8 @@ When the endpoint process or yamux control channel fails, the host control gorou
 
 **Priority:** High
 
+**Status:** Done
+
 Tunnel setup has no end-to-end deadline. The host can wait indefinitely for the endpoint response, and the endpoint uses an unbounded `net.Dial` call.
 
 **Files:**

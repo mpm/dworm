@@ -1,5 +1,7 @@
 package protocol
 
+import "time"
+
 // Socket paths for agent forwarding in the container
 const (
 	SSHAgentSocketPath      = "/tmp/dworm-ssh-agent.sock"
@@ -12,4 +14,5 @@ const (
 const (
 	MaxControlMessageSize = 1024 * 1024 // 1MB max control message size
 	MaxGitCredentialInput = 64 * 1024   // 64KB max git credential input
+	TunnelSetupTimeout    = 5 * time.Second
 )

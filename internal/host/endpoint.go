@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/mpm/dworm/internal/protocol"
 )
@@ -20,6 +21,7 @@ type EndpointManager struct {
 	cmd          *exec.Cmd
 	logger       *log.Logger
 	stderrWriter io.Writer
+	setupTimeout time.Duration
 }
 
 // NewEndpointManager creates a new endpoint manager.
@@ -34,6 +36,7 @@ func NewEndpointManager(containerID string, logWriter io.Writer) *EndpointManage
 		containerID:  containerID,
 		logger:       log.New(stderr, "[host] ", log.LstdFlags),
 		stderrWriter: stderr,
+		setupTimeout: protocol.TunnelSetupTimeout,
 	}
 }
 
@@ -123,6 +126,14 @@ func (e *EndpointManager) OpenTunnelStream(port int) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	setupTimeout := e.setupTimeout
+	if setupTimeout == 0 {
+		setupTimeout = protocol.TunnelSetupTimeout
+	}
+	if err := stream.SetDeadline(time.Now().Add(setupTimeout)); err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("failed to set tunnel setup deadline: %w", err)
+	}
 
 	// Send port as 4-byte header
 	portBuf := []byte{
@@ -147,6 +158,10 @@ func (e *EndpointManager) OpenTunnelStream(port int) (net.Conn, error) {
 	if respBuf[0] != 1 {
 		stream.Close()
 		return nil, fmt.Errorf("tunnel connection failed")
+	}
+	if err := stream.SetDeadline(time.Time{}); err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("failed to clear tunnel setup deadline: %w", err)
 	}
 
 	return stream, nil
