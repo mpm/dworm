@@ -24,6 +24,18 @@ func TestCalculateShellHeightClampsSmallTerminal(t *testing.T) {
 	}
 }
 
+func TestRestoreLeavesAlternateScreenAndResetsTerminalDisplay(t *testing.T) {
+	var output bytes.Buffer
+	m := &Model{output: &output}
+
+	m.restore()
+
+	want := resetScrollRegion + exitAltScreen + showCursor
+	if got := output.String(); got != want {
+		t.Fatalf("restore output mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestWritePTYOutputRepairsSplitScrollRegionReset(t *testing.T) {
 	var output bytes.Buffer
 	m := testModel(&output, 80, 24)

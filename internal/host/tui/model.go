@@ -32,6 +32,8 @@ const (
 	showCursor        = csi + "?25h"
 	clearLine         = csi + "2K"
 	resetScrollRegion = csi + "r"
+	enterAltScreen    = csi + "?1049h"
+	exitAltScreen     = csi + "?1049l"
 )
 
 // Model manages the TUI session
@@ -103,6 +105,7 @@ func (m *Model) run() error {
 		return fmt.Errorf("failed to set raw mode: %w", err)
 	}
 	defer m.restore()
+	m.writeString(enterAltScreen)
 
 	// Build docker exec command
 	cmd := m.buildDockerCommand()
@@ -491,8 +494,8 @@ func repairsTerminalState(part []byte) bool {
 	if bytes.Equal(part, []byte("\x1bc")) {
 		return true
 	}
-	return bytes.Equal(part, []byte("\x1b[?1049h")) ||
-		bytes.Equal(part, []byte("\x1b[?1049l")) ||
+	return bytes.Equal(part, []byte(enterAltScreen)) ||
+		bytes.Equal(part, []byte(exitAltScreen)) ||
 		bytes.Equal(part, []byte("\x1b[?47h")) ||
 		bytes.Equal(part, []byte("\x1b[?47l")) ||
 		bytes.Equal(part, []byte("\x1b[?1047h")) ||
@@ -580,13 +583,14 @@ func (m *Model) writeString(s string) {
 }
 
 func (m *Model) restore() {
+	m.outputMu.Lock()
+	fmt.Fprint(m.output, resetScrollRegion)
+	fmt.Fprint(m.output, exitAltScreen)
+	fmt.Fprint(m.output, showCursor)
+	m.outputMu.Unlock()
 	if m.origTermState != nil {
 		term.Restore(int(os.Stdin.Fd()), m.origTermState)
 	}
-	m.outputMu.Lock()
-	fmt.Fprint(m.output, resetScrollRegion)
-	fmt.Fprint(m.output, showCursor)
-	m.outputMu.Unlock()
 }
 
 // ANSI helper functions
