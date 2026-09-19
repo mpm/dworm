@@ -50,7 +50,7 @@ environments.`,
 		Use:   "up",
 		Short: "Start container, inject endpoint, establish tunnel",
 		Args:  cobra.NoArgs,
-		RunE:  runUp,
+		RunE:  runOperationalCommand(runUp),
 	}
 	upCmd.Flags().BoolVar(&daemonMode, "daemon", false, "Run in daemon mode (no shell)")
 	upCmd.Flags().StringVar(&bindAddr, "bind", "127.0.0.1", "Address to bind forwarded ports to (e.g., 0.0.0.0 for all interfaces)")
@@ -61,7 +61,7 @@ environments.`,
 		Use:   "down",
 		Short: "Stop the devcontainer",
 		Args:  cobra.NoArgs,
-		RunE:  runDown,
+		RunE:  runOperationalCommand(runDown),
 	}
 	rootCmd.AddCommand(downCmd)
 
@@ -70,7 +70,7 @@ environments.`,
 		Use:   "shell",
 		Short: "Open a shell in the container",
 		Args:  cobra.NoArgs,
-		RunE:  runShell,
+		RunE:  runOperationalCommand(runShell),
 	}
 	rootCmd.AddCommand(shellCmd)
 
@@ -79,7 +79,7 @@ environments.`,
 		Use:   "exec -- COMMAND [ARG...]",
 		Short: "Run a command in the container and exit",
 		Args:  cobra.MinimumNArgs(1),
-		RunE:  runExec,
+		RunE:  runOperationalCommand(runExec),
 	}
 	rootCmd.AddCommand(execCmd)
 
@@ -88,7 +88,7 @@ environments.`,
 		Use:   "status",
 		Short: "Show forwarded ports and active configuration",
 		Args:  cobra.NoArgs,
-		RunE:  runStatus,
+		RunE:  runOperationalCommand(runStatus),
 	}
 	rootCmd.AddCommand(statusCmd)
 
@@ -98,9 +98,9 @@ environments.`,
 		Use:   "remove",
 		Short: "Stop, remove container and its image",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: runOperationalCommand(func(cmd *cobra.Command, args []string) error {
 			return runRemove(cmd, args, forceRemove)
-		},
+		}),
 	}
 	removeCmd.Flags().BoolVarP(&forceRemove, "force", "f", false, "Skip confirmation prompt")
 	rootCmd.AddCommand(removeCmd)
@@ -110,7 +110,7 @@ environments.`,
 		Use:   "rebuild",
 		Short: "Rebuild the devcontainer from scratch",
 		Args:  cobra.NoArgs,
-		RunE:  runRebuild,
+		RunE:  runOperationalCommand(runRebuild),
 	}
 	rootCmd.AddCommand(rebuildCmd)
 
@@ -135,6 +135,15 @@ environments.`,
 
 	if err != nil {
 		os.Exit(1)
+	}
+}
+
+func runOperationalCommand(runE func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		// Cobra has already validated flags and arguments before RunE starts. Any
+		// error from here is operational, so usage instructions would be misleading.
+		cmd.Root().SilenceUsage = true
+		return runE(cmd, args)
 	}
 }
 
