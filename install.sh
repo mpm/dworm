@@ -62,8 +62,12 @@ echo "Installing to ${INSTALL_DIR}..."
 mkdir -p "$INSTALL_DIR"
 tar -xzf "$ARCHIVE"
 cp "dworm_${VERSION}_${OS}_${ARCH}/dworm" "$INSTALL_DIR/"
-cp "dworm_${VERSION}_${OS}_${ARCH}/dworm_endpoint" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/dworm" "$INSTALL_DIR/dworm_endpoint"
+chmod +x "$INSTALL_DIR/dworm"
+# Older releases shipped a separate endpoint.
+if [ -f "dworm_${VERSION}_${OS}_${ARCH}/dworm_endpoint" ]; then
+    cp "dworm_${VERSION}_${OS}_${ARCH}/dworm_endpoint" "$INSTALL_DIR/"
+    chmod +x "$INSTALL_DIR/dworm_endpoint"
+fi
 
 echo ""
 echo "Successfully installed dworm to ${INSTALL_DIR}"

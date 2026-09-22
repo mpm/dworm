@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/mpm/dworm/internal/host/endpointbundle"
 	"github.com/mpm/dworm/internal/protocol"
 )
 
@@ -41,22 +43,51 @@ func NewEndpointManager(containerID string, logWriter io.Writer) *EndpointManage
 }
 
 // InjectAndStart copies the endpoint binary to the container and starts it
-func (e *EndpointManager) InjectAndStart(endpointBinaryPath string) error {
+func (e *EndpointManager) InjectAndStart() error {
+	// Inspect the immutable image ID used by this container, not a mutable tag
+	// or the Docker daemon's own architecture (which may run emulated images).
+	image, err := exec.Command("docker", "inspect", "--type", "container", "--format", "{{.Image}}", e.containerID).Output()
+	if err != nil {
+		return fmt.Errorf("inspect container image: %w", err)
+	}
+	platform, err := exec.Command("docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", strings.TrimSpace(string(image))).Output()
+	if err != nil {
+		return fmt.Errorf("inspect container image platform: %w", err)
+	}
+	payload, err := endpointbundle.Payload(string(platform))
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "dworm-endpoint-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	endpointBinaryPath := filepath.Join(dir, "dworm_endpoint")
+	if err := os.WriteFile(endpointBinaryPath, payload, 0700); err != nil {
+		return err
+	}
 	// Copy binary to container
 	containerPath := "/tmp/dworm_endpoint"
+	// Rename a unique staged file atomically: existing processes keep their inode.
+	stage := containerPath + "." + filepath.Base(dir)
+	defer exec.Command("docker", "exec", e.containerID, "rm", "-f", stage).Run()
 
 	e.logger.Printf("Copying endpoint binary to container...")
-	copyCmd := exec.Command("docker", "cp", endpointBinaryPath, fmt.Sprintf("%s:%s", e.containerID, containerPath))
+	copyCmd := exec.Command("docker", "cp", endpointBinaryPath, fmt.Sprintf("%s:%s", e.containerID, stage))
 	if output, err := copyCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to copy endpoint binary: %w\noutput: %s", err, string(output))
 	}
 
 	// Make executable
-	chmodCmd := exec.Command("docker", "exec", e.containerID, "chmod", "+x", containerPath)
+	chmodCmd := exec.Command("docker", "exec", e.containerID, "chmod", "755", stage)
 	if output, err := chmodCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to chmod endpoint binary: %w\noutput: %s", err, string(output))
 	}
 
+	if output, err := exec.Command("docker", "exec", e.containerID, "mv", "-f", stage, containerPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to publish endpoint: %w: %s", err, output)
+	}
 	e.endpointPath = containerPath
 
 	// Start endpoint process
@@ -196,38 +227,6 @@ func (e *EndpointManager) Close() error {
 		e.cmd.Wait()
 	}
 	return nil
-}
-
-// GetEndpointBinaryPath returns the path to the endpoint binary
-func GetEndpointBinaryPath() (string, error) {
-	// First check next to the dworm binary
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-
-	binDir := filepath.Dir(exe)
-	endpointPath := filepath.Join(binDir, "dworm_endpoint")
-
-	if _, err := os.Stat(endpointPath); err == nil {
-		return endpointPath, nil
-	}
-
-	// Check in common locations
-	paths := []string{
-		"/usr/local/bin/dworm_endpoint",
-		"/usr/bin/dworm_endpoint",
-		"./bin/dworm_endpoint",
-		"./dworm_endpoint",
-	}
-
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-
-	return "", fmt.Errorf("dworm_endpoint binary not found")
 }
 
 // pipeReadWriteCloser wraps pipes as a ReadWriteCloser

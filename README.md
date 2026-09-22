@@ -17,7 +17,7 @@ A CLI tool that bridges your host machine and devcontainer environments, providi
 
 ## Requirements
 
-- Go 1.24.4+ (for building from source)
+- Go 1.24.11+ (for building from source)
 - Docker
 - [devcontainer CLI](https://github.com/devcontainers/cli) (`npm install -g @devcontainers/cli`)
 
@@ -49,9 +49,36 @@ cd dworm
 make build
 
 # Binaries are in ./bin/
-# - bin/dworm          (host CLI)
-# - bin/dworm_endpoint (injected into container)
+# - bin/dworm          (host CLI with both Linux endpoints embedded)
+# - bin/dworm_endpoint (standalone amd64 endpoint for development)
 ```
+
+Install only `bin/dworm`. Hosts are distributed for Linux and macOS, amd64 and
+arm64; every host includes Linux amd64 and arm64 endpoints. The container image's
+platform determines which endpoint is injected, including emulated containers.
+Old separately installed `dworm_endpoint` files are ignored and no longer needed.
+
+Use `make prepare-endpoints` before direct `go build` or `go test ./...` commands.
+`make build-host`, `make test-unit`, and `make test-race` prepare assets automatically.
+`make clean` removes them. Use this checkout-based workflow rather than
+`go install ...@latest`, which cannot generate the required embedded executables.
+
+### Updating
+
+```bash
+dworm self-update
+```
+
+This checks for the latest stable release, verifies its SHA-256 checksum, and
+replaces the running executable's resolved path (preserving symlinks). It works
+outside a workspace without Docker. The next invocation uses the new host and
+bundled endpoints; active sessions are not restarted. Already-current or newer
+versions are left alone. Development/dirty builds cannot self-update. Destination
+directory permissions must allow replacement; errors include the release URL for
+manual installation.
+
+Versions before v0.6.0 need the installer or a manual installation once to gain
+the `self-update` command. The installer still supports older two-binary archives.
 
 ## Usage
 
@@ -150,8 +177,9 @@ in a `0700` directory. Generated values are not written to the workspace or logg
 by dworm; command stderr is forwarded as diagnostics. If the container remains
 running after dworm exits, shells can use the last snapshot, but refreshes stop.
 
-When upgrading, install both `dworm` and `dworm_endpoint` from the same release,
-stop the old host-side dworm process, and run `dworm up` again to inject the new
+When upgrading to v0.6.0 or later, install `dworm`, which includes its matching
+endpoints. To activate updated forwarding behavior, stop the old host-side dworm
+process and run `dworm up` again to inject the new
 endpoint. Reopen existing shells to activate the environment reload hook.
 
 ### Other commands
@@ -326,7 +354,7 @@ Some E2E tests are conditional:
 
 - No automatic reconnection on disconnect
 - Port range limited to 1024-20000
-- Linux containers only (endpoint binary is Linux amd64)
+- Linux containers only (amd64 and arm64 endpoints are embedded)
 
 ## License
 

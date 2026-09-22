@@ -31,8 +31,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Prepare embedded endpoints
+        run: make prepare-endpoints
+
       - name: Build host binary
         env:
+          CGO_ENABLED: '0'
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
@@ -42,17 +46,12 @@ jobs:
           LDFLAGS="-s -w -X github.com/mpm/dworm/internal/version.Version=${VERSION} -X github.com/mpm/dworm/internal/version.Commit=${COMMIT} -X github.com/mpm/dworm/internal/version.Date=${DATE}"
           go build -ldflags="${LDFLAGS}" -o dworm ./cmd/dworm
 
-      - name: Build endpoint binary
-        run: |
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dworm_endpoint ./cmd/dworm_endpoint
-
       - name: Package release
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           ARCHIVE_NAME="dworm_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
           mkdir -p dist/${ARCHIVE_NAME}
           cp dworm dist/${ARCHIVE_NAME}/
-          cp dworm_endpoint dist/${ARCHIVE_NAME}/
           cp README.md LICENSE* dist/${ARCHIVE_NAME}/ 2>/dev/null || true
           cd dist
           tar -czvf ${ARCHIVE_NAME}.tar.gz ${ARCHIVE_NAME}

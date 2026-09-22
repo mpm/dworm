@@ -116,12 +116,21 @@ environments.`,
 		RunE:  runOperationalCommand(runRebuild),
 	}
 	rootCmd.AddCommand(rebuildCmd)
+	rootCmd.AddCommand(&cobra.Command{
+		Use: "self-update", Short: "Install the latest stable dworm release", Args: cobra.NoArgs,
+		RunE: runOperationalCommand(func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+			return version.SelfUpdate(ctx, cmd.OutOrStdout())
+		}),
+	})
 
 	// Start version check in background (non-blocking)
 	updateCh := make(chan *version.CheckResult, 1)
-	go func() {
-		updateCh <- version.CheckForUpdate()
-	}()
+	selected, _, _ := rootCmd.Find(os.Args[1:])
+	if selected == nil || selected.Name() != "self-update" {
+		go func() { updateCh <- version.CheckForUpdate() }()
+	}
 
 	err := rootCmd.Execute()
 
@@ -130,7 +139,7 @@ environments.`,
 	case result := <-updateCh:
 		if result != nil && result.UpdateAvailable {
 			fmt.Fprintf(os.Stderr, "\nA new version of dworm is available: %s (current: %s)\n", result.Latest, result.Current)
-			fmt.Fprintf(os.Stderr, "Download: %s\n", result.ReleaseURL)
+			fmt.Fprintf(os.Stderr, "Run dworm self-update or download: %s\n", result.ReleaseURL)
 		}
 	default:
 		// Check not complete yet, skip
@@ -260,17 +269,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 		logger.SetOutput(logWriter)
 	}
 
-	// Find endpoint binary
-	endpointPath, err := host.GetEndpointBinaryPath()
-	if err != nil {
-		return fmt.Errorf("endpoint binary not found: %w", err)
-	}
-
 	// Create endpoint manager (pass logWriter; nil in daemon mode falls back to stderr)
 	endpoint := host.NewEndpointManager(containerInfo.ContainerID, logWriter)
 
 	// Inject and start endpoint
-	if err := endpoint.InjectAndStart(endpointPath); err != nil {
+	if err := endpoint.InjectAndStart(); err != nil {
 		return fmt.Errorf("failed to start endpoint: %w", err)
 	}
 
