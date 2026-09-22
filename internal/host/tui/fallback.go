@@ -7,6 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/mpm/dworm/internal/protocol"
+
 	"golang.org/x/term"
 )
 
@@ -64,7 +66,8 @@ func buildDockerCommand(containerID, workDir string, envVars map[string]string) 
 		args = append(args, "-e", key+"="+value)
 	}
 
-	args = append(args, containerID, "/bin/bash")
+	args = append(args, containerID)
+	args = append(args, protocol.EnvironmentCommand(envVars, true, []string{"/bin/bash"})...)
 
 	return exec.Command("docker", args...)
 }

@@ -7,10 +7,12 @@ import (
 
 // Message types
 const (
-	TypeInit       = "init"
-	TypePortUpdate = "port_update"
-	TypePing       = "ping"
-	TypePong       = "pong"
+	TypeInit             = "init"
+	TypePortUpdate       = "port_update"
+	TypePing             = "ping"
+	TypePong             = "pong"
+	TypeEnvironment      = "environment"
+	TypeEnvironmentReady = "environment_ready"
 )
 
 // Stream type markers (first byte of streams opened by endpoint)

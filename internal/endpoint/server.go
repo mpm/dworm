@@ -1,6 +1,7 @@
 package endpoint
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 type Server struct {
 	mux              *protocol.Mux
 	envVars          map[string]string
+	baseEnv          map[string]string
 	portStateMu      sync.RWMutex
 	currentPorts     []protocol.PortInfo
 	portAddresses    map[int]string // port -> best bind address for connecting
@@ -87,7 +89,20 @@ func (s *Server) waitForInit() error {
 		return err
 	}
 
+	s.baseEnv = inheritedEnvironment()
 	s.envVars = initMsg.EnvVars
+	if s.envVars == nil {
+		s.envVars = map[string]string{}
+	}
+	if initMsg.AgentForward {
+		s.envVars["SSH_AUTH_SOCK"] = initMsg.AgentSocketPath
+	}
+	if err := PublishEnvironment(s.envVars); err != nil {
+		return err
+	}
+	if err := s.mux.SendControl(protocol.TypeEnvironmentReady, nil); err != nil {
+		return err
+	}
 
 	// Set environment variables
 	if err := SetEnvironment(s.envVars); err != nil {
@@ -365,6 +380,27 @@ func (s *Server) handleControlMessages() error {
 		}
 
 		switch msgType {
+		case protocol.TypeEnvironment:
+			var env map[string]string
+			if err := json.Unmarshal(data, &env); err != nil {
+				return fmt.Errorf("invalid environment update")
+			}
+			if err := PublishEnvironment(env); err != nil {
+				return fmt.Errorf("publish environment: %w", err)
+			}
+			for key := range s.envVars {
+				if _, ok := env[key]; !ok {
+					if value, exists := s.baseEnv[key]; exists {
+						os.Setenv(key, value)
+					} else {
+						os.Unsetenv(key)
+					}
+				}
+			}
+			if err := SetEnvironment(env); err != nil {
+				return err
+			}
+			s.envVars = env
 		case protocol.TypePing:
 			if err := s.mux.SendControl(protocol.TypePong, nil); err != nil {
 				s.logger.Printf("Failed to send pong: %v", err)

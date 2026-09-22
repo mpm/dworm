@@ -36,6 +36,7 @@ echo ""
 # Run each test
 run_test "test-port-forward.sh"
 run_test "test-env-vars.sh"
+run_test "test-project-env.sh"
 run_test "test-ssh-agent.sh"
 run_test "test-gpg-agent.sh"
 run_test "test-git-creds.sh"

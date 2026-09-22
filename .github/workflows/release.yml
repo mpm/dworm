@@ -68,6 +68,17 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate prepared release notes
+        id: notes
+        env:
+          NOTES_PATH: docs/releases/${{ github.ref_name }}.md
+        run: |
+          if [ -f "$NOTES_PATH" ]; then
+            echo "path=$NOTES_PATH" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -82,6 +93,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ steps.notes.outputs.path }}
           files: |
             artifacts/*.tar.gz
             artifacts/checksums.txt

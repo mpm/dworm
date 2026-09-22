@@ -120,6 +120,25 @@ func (e *EndpointManager) RecvControl() (string, []byte, error) {
 	return e.mux.RecvControl()
 }
 
+// WaitEnvironmentReady is called before starting the general control reader.
+func (e *EndpointManager) WaitEnvironmentReady() error {
+	result := make(chan error, 1)
+	go func() {
+		kind, _, err := e.RecvControl()
+		if err == nil && kind != protocol.TypeEnvironmentReady {
+			err = fmt.Errorf("expected environment acknowledgement, got %s", kind)
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(30 * time.Second):
+		e.mux.Close()
+		return fmt.Errorf("timed out waiting for environment initialization")
+	}
+}
+
 // OpenTunnelStream opens a new stream for tunneling to a port
 func (e *EndpointManager) OpenTunnelStream(port int) (net.Conn, error) {
 	stream, err := e.mux.OpenStream()

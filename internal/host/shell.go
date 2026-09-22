@@ -7,6 +7,8 @@ import (
 	"os/signal"
 	"sort"
 	"syscall"
+
+	"github.com/mpm/dworm/internal/protocol"
 )
 
 // ExecShell opens an interactive shell in the container
@@ -77,7 +79,7 @@ func buildDockerExecArgs(containerID string, workDir string, envVars map[string]
 	}
 
 	args = append(args, containerID)
-	args = append(args, command...)
+	args = append(args, protocol.EnvironmentCommand(envVars, interactive, command)...)
 
 	return args
 }

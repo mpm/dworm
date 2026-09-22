@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -10,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/mpm/dworm/internal/config"
 	"github.com/mpm/dworm/internal/host"
 	"github.com/mpm/dworm/internal/host/tui"
 	"github.com/mpm/dworm/internal/protocol"
@@ -214,6 +217,28 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	projectConfig, staticEnv, err := config.Load(workspacePath)
+	if err != nil {
+		return err
+	}
+	if !cmd.Flags().Changed("bind") && projectConfig.Bind != "" {
+		bindAddr = projectConfig.Bind
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	cliEnv := parseEnvVars()
+	if err := config.Validate(cliEnv); err != nil {
+		return err
+	}
+	generatedEnv, err := host.RunEnvironmentCommand(ctx, workspacePath, projectConfig.HostEnv, os.Stderr)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	envs := config.Merge(staticEnv, generatedEnv, cliEnv)
+
 	logger.Printf("Starting devcontainer at %s...", workspacePath)
 
 	// Start container
@@ -307,10 +332,13 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Send init message
-	envs := parseEnvVars()
 	if err := endpoint.SendInit(envs, sshForward, containerSSHSocket, gpgForward, containerGPGSocket, gitConfig, gitCredForward, gpgPublicKeys); err != nil {
 		endpoint.Close()
 		return fmt.Errorf("failed to send init: %w", err)
+	}
+	defer endpoint.Close()
+	if err := endpoint.WaitEnvironmentReady(); err != nil {
+		return fmt.Errorf("initialize environment: %w", err)
 	}
 
 	if sshForward {
@@ -330,6 +358,30 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	logger.Printf("Endpoint initialized with %d env vars", len(envs))
+	interval, _, _ := projectConfig.HostEnv.Durations()
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		host.RefreshEnvironment(ctx, interval, func() error {
+			generated, err := host.RunEnvironmentCommand(ctx, workspacePath, projectConfig.HostEnv, logger.Writer())
+			if err != nil {
+				return err
+			}
+			next := config.Merge(staticEnv, generated, cliEnv)
+			if sshForward {
+				next["SSH_AUTH_SOCK"] = containerSSHSocket
+			}
+			return endpoint.GetMux().SendControl(protocol.TypeEnvironment, next)
+		}, func(err error) { logger.Printf("Environment refresh failed (keeping previous values): %v", err) })
+	}()
+	defer func() {
+		cancel()
+		endpoint.GetMux().Close()
+		select {
+		case <-refreshDone:
+		case <-time.After(2 * time.Second):
+		}
+	}()
 
 	// Start agent handler if any forwarding is enabled
 	var agentHandler *host.AgentHandler
@@ -380,6 +432,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			msgType, data, err := endpoint.RecvControl()
 			if err != nil {
 				transportErr := fmt.Errorf("endpoint transport failed: %w", err)
+				cancel()
 				logger.Printf("Forwarding stopped: %v", transportErr)
 				tunnels.Close()
 				transportFailureCh <- transportErr
@@ -411,7 +464,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			containerInfo.ContainerID,
 			containerInfo.ContainerName,
 			containerInfo.WorkspaceDir,
-			envs,
+			nil,
 			tuiPortUpdateCh,
 			logBuffer,
 			logUpdateCh,

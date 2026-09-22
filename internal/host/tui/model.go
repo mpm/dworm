@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	"github.com/mpm/dworm/internal/protocol"
 	"golang.org/x/term"
 )
 
@@ -197,7 +198,8 @@ func (m *Model) buildDockerCommand() *exec.Cmd {
 		args = append(args, "-e", key+"="+value)
 	}
 
-	args = append(args, m.containerID, "/bin/bash")
+	args = append(args, m.containerID)
+	args = append(args, protocol.EnvironmentCommand(m.envVars, true, []string{"/bin/bash"})...)
 
 	return exec.Command("docker", args...)
 }

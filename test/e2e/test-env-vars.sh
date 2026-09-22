@@ -30,7 +30,7 @@ fi
 
 # Check env var in container
 log_info "Checking environment variable in container..."
-RESULT=$(docker exec "$CONTAINER_ID" printenv TEST_VAR 2>/dev/null || true)
+RESULT=$(cd "$DEVCONTAINER_PATH" && "$DWORM" exec -- printenv TEST_VAR 2>/dev/null || true)
 
 if [[ "$RESULT" == "$TEST_VAR" ]]; then
     log_pass "Environment variable forwarding works correctly"
