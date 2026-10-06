@@ -138,6 +138,23 @@ WantedBy=default.target
 
 While running, `dworm up` keeps a state file (`<hash>.json`, next to the lock)
 with its PID, container, workspace folder, connection state, and forwarded ports.
+`dworm status --json` combines it with the container's state:
+
+```json
+{
+  "workspace_path": "/home/me/projects/app",
+  "container": {"id": "2e7d99a944c1", "name": "app-1", "running": true,
+                "remote_user": "vscode", "workspace_folder": "/workspaces/app"},
+  "up": {"running": true, "pid": 751026, "started_at": "2026-10-06T13:15:58Z",
+         "endpoint_connected": true,
+         "ports": [{"port": 3000, "address": "127.0.0.1", "local_port": 3000}]},
+  "dworm_version": "v0.7.0"
+}
+```
+
+`container` is `null` when the workspace has no container, and `up.running` is
+true only while a `dworm up` holds the workspace lock. Both cases exit 0; non-zero
+exit codes mean dworm could not determine the status (e.g. Docker is unavailable).
 
 ### Project environment and host startup commands
 
@@ -235,8 +252,9 @@ dworm exec -- npm test
 dworm exec -w /tmp -- ls          # explicit working directory
 printf 'data' | dworm exec -- cat # stdin/stdout are passed through byte for byte
 
-# Check container status
+# Show container, dworm up, and forwarded port status
 dworm status
+dworm status --json   # machine-readable
 
 # Remove container and its image (prompts for confirmation)
 dworm remove

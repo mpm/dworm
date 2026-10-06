@@ -1,6 +1,6 @@
 #!/bin/bash
-# Test dworm up --daemon lifecycle: single instance, state file, signal and
-# bridge-failure exit codes, plain log line endings
+# Test dworm up --daemon lifecycle: single instance, state file, status --json,
+# signal and bridge-failure exit codes, plain log line endings
 
 set -e
 
@@ -42,6 +42,15 @@ start_daemon() {
     return 1
 }
 
+status_field() {
+    (cd "$DEVCONTAINER_PATH" && "$DWORM" status --json 2>/dev/null) |
+        python3 -c 'import json, sys
+value = json.load(sys.stdin)
+for key in sys.argv[1].split("."):
+    value = value[key] if value is not None else None
+print(json.dumps(value))' "$1"
+}
+
 wait_exit() {
     local status=0
     timeout "$2" tail --pid="$1" -f /dev/null || return 124
@@ -62,6 +71,16 @@ if [[ "$(stat -c %a "$RUNTIME_DIR")" != "700" ]]; then
     log_fail "Runtime directory mode is $(stat -c %a "$RUNTIME_DIR"), want 700"
     exit 1
 fi
+
+log_info "Checking dworm status --json..."
+for check in "up.running=true" "up.pid=$DWORM_PID" "up.endpoint_connected=true" \
+    "container.running=true" "container.workspace_folder=\"/home/developer/workspace\""; do
+    got=$(status_field "${check%%=*}")
+    if [[ "$got" != "${check#*=}" ]]; then
+        log_fail "status ${check%%=*} = $got, want ${check#*=}"
+        exit 1
+    fi
+done
 
 log_info "Checking that a second dworm up fails fast..."
 status=0
@@ -93,6 +112,10 @@ if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_ID")" != "true" ]]; 
 fi
 if [[ -e "$STATE_FILE" ]]; then
     log_fail "State file remains after shutdown"
+    exit 1
+fi
+if [[ "$(status_field up.running)" != "false" ]]; then
+    log_fail "status reports up.running after shutdown"
     exit 1
 fi
 if grep -q $'\r' "$LOG_DIR/first.log"; then

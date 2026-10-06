@@ -32,6 +32,7 @@ internal/
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
 │   ├── instance.go         # Per-workspace flock, runtime dir, state file (instance_unix.go: flock)
+│   ├── status.go           # `dworm status` data (GetStatus, RunningInstance, WorkspaceFolder)
 │   ├── shell.go            # `dworm shell`/`dworm exec` via docker exec (stdio passthrough, ExitError)
 │   ├── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
 │   └── tui/                # Terminal UI for interactive shell
@@ -102,9 +103,11 @@ CLI flags:
 Key flows:
 - `up`: AcquireInstanceLock → DevcontainerUp → InjectAndStart → SendInit → handle port updates → ForwardPort
 - `down`: DevcontainerDown (finds container by label, docker stop)
-- `shell` / `exec`: start in the workspace folder from `ResolveWorkspaceFolder` (`container.go`: the bind
-  mount containing the workspace path, mapped into the container; "" = image default). `exec --workdir/-w`
+- `shell` / `exec`: start in the workspace folder from `host.WorkspaceFolder`: the running `up`'s state
+  file if it is for the same container, else `ResolveWorkspaceFolder` (`container.go`: the bind mount
+  containing the workspace path, mapped into the container; "" = image default). `exec --workdir/-w`
   overrides it.
+- `status [--json]`: `host.GetStatus` (see below). Exits 0 when there is no container or no `up`.
 - `exec -- CMD...`: runs `docker exec -i` through the `--with-env` launcher. Stdin is always attached;
   `-t` is added only when stdin and stdout are both terminals. stdout carries only the child's stdout
   (all diagnostics go to stderr). The child's exit status becomes dworm's exit status
@@ -133,6 +136,23 @@ Key flows:
   treated as a stop.
 - Logs: `protocol.NewLogWriter` uses `CRWriter` only when the file is a terminal; the endpoint logs
   plain lines to its stderr pipe.
+
+### `dworm status --json` (`internal/host/status.go`)
+
+Fields (all always present unless noted):
+- `workspace_path`: absolute host path of the workspace (the current directory)
+- `container`: `null` when no container (running or stopped) has label
+  `devcontainer.local_folder=<workspace_path>`, else an object:
+  - `id` (12-char short ID), `name`, `running`
+  - `remote_user`: from the running `up`'s state, else the `devcontainer.metadata` label (last
+    `remoteUser`, then last `containerUser`, then the image user)
+  - `workspace_folder`: from the running `up`'s state, else the bind-mount heuristic
+- `up`: `running` (true only if the lock is held, checked with a non-blocking flock),
+  `endpoint_connected`, `ports` (`[{port, address, local_port}]`, `[]` when not running), and when
+  running `pid`, `started_at` (RFC 3339, omitted if unknown)
+- `dworm_version`: `version.Version`
+
+The human-readable output (default) shows the same information.
 
 ### Endpoint Binary (`cmd/dworm_endpoint/`)
 
@@ -229,6 +249,7 @@ Test files:
 - `internal/endpoint/portscanner_test.go` - /proc/net/tcp parsing, port diff logic
 - `internal/host/agent_test.go` - SSH/GPG/git credential stream routing
 - `internal/host/instance_test.go` - Instance lock exclusivity/probing, state file
+- `internal/host/status_test.go` - Status JSON shape, metadata/remote user parsing (fake `docker`)
 - `internal/host/shell_test.go` - `docker exec` argument building, stdio/exit code passthrough (fake `docker` on PATH)
 
 **Test harness** (`internal/protocol/testutil/harness.go`):
@@ -249,7 +270,7 @@ E2E scripts in `test/e2e/`:
 - `test-port-forward.sh` - Port forwarding test
 - `test-env-vars.sh` - Environment variable forwarding
 - `test-exec-stdio.sh` - `dworm exec` stdin/stdout passthrough, stdin EOF, exit codes, working directory
-- `test-daemon.sh` - `up --daemon` single instance (exit 3), state file, SIGTERM exit 0, bridge failure exit ≠ 0
+- `test-daemon.sh` - `up --daemon` single instance (exit 3), state file, `status --json`, SIGTERM exit 0, bridge failure exit ≠ 0
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
 - `test-git-creds.sh` - Git credential forwarding (conditional)

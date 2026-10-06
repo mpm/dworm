@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ var (
 	configPath string
 	bindAddr   string
 	execDir    string
+	statusJSON bool
 	crStderr   = protocol.NewLogWriter(os.Stderr)
 	crStdout   = protocol.NewLogWriter(os.Stdout)
 	logger     = log.New(crStderr, "", log.LstdFlags)
@@ -107,10 +109,11 @@ environments.`,
 	// Status command
 	statusCmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show forwarded ports and active configuration",
+		Short: "Show container, dworm up, and forwarded port status",
 		Args:  cobra.NoArgs,
 		RunE:  runOperationalCommand(runStatus),
 	}
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Print machine-readable JSON")
 	rootCmd.AddCommand(statusCmd)
 
 	// Remove command
@@ -623,7 +626,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get container ID: %w", err)
 	}
 
-	return host.ExecShell(containerID, host.ResolveWorkspaceFolder(containerID, workspacePath), parseEnvVars())
+	return host.ExecShell(containerID, host.WorkspaceFolder(containerID, workspacePath), parseEnvVars())
 }
 
 func runExec(cmd *cobra.Command, args []string) error {
@@ -639,7 +642,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 
 	workDir := execDir
 	if workDir == "" {
-		workDir = host.ResolveWorkspaceFolder(containerID, workspacePath)
+		workDir = host.WorkspaceFolder(containerID, workspacePath)
 	}
 	return host.ExecCommand(containerID, workDir, parseEnvVars(), args)
 }
@@ -698,19 +701,63 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Get container ID
-	containerID, err := host.GetContainerID(workspacePath)
+	status, err := host.GetStatus(workspacePath, version.Version)
 	if err != nil {
-		return fmt.Errorf("no running container found for %s", workspacePath)
+		return err
 	}
 
-	if !host.IsContainerRunning(containerID) {
-		fmt.Fprintf(crStdout, "Container %s is not running\n", containerID[:12])
-		return nil
+	if statusJSON {
+		encoder := json.NewEncoder(cmd.OutOrStdout())
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(status)
 	}
-
-	fmt.Fprintf(crStdout, "Container: %s\n", containerID[:12])
-	fmt.Fprintf(crStdout, "Status: running\n")
-
+	printStatus(crStdout, status)
 	return nil
+}
+
+func printStatus(w io.Writer, status *host.Status) {
+	fmt.Fprintf(w, "Workspace:  %s\n", status.WorkspacePath)
+	if c := status.Container; c == nil {
+		fmt.Fprintf(w, "Container:  none\n")
+	} else {
+		state := "stopped"
+		if c.Running {
+			state = "running"
+		}
+		fmt.Fprintf(w, "Container:  %s (%s), %s\n", c.Name, c.ID, state)
+		fmt.Fprintf(w, "  Remote user:      %s\n", valueOrDash(c.RemoteUser))
+		fmt.Fprintf(w, "  Workspace folder: %s\n", valueOrDash(c.WorkspaceFolder))
+	}
+
+	up := status.Up
+	if !up.Running {
+		fmt.Fprintf(w, "dworm up:   not running\n")
+		return
+	}
+	since := ""
+	if up.StartedAt != nil {
+		since = ", since " + up.StartedAt.Local().Format(time.DateTime)
+	}
+	connection := "endpoint not connected"
+	if up.EndpointConnected {
+		connection = "endpoint connected"
+	}
+	fmt.Fprintf(w, "dworm up:   running (pid %d%s), %s\n", up.PID, since, connection)
+	if len(up.Ports) == 0 {
+		fmt.Fprintf(w, "  Forwarded ports:  none\n")
+	}
+	for i, p := range up.Ports {
+		label := ""
+		if i == 0 {
+			label = "Forwarded ports:"
+		}
+		fmt.Fprintf(w, "  %-17s %s:%d -> container:%d\n", label, p.Address, p.LocalPort, p.Port)
+	}
+}
+
+func valueOrDash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
