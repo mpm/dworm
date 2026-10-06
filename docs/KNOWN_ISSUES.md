@@ -14,6 +14,21 @@ This document tracks known limitations and potential issues with existing functi
 
 **Files affected**: `internal/host/tui/model.go`, `internal/host/tui/statusbar.go`
 
+## Command Execution
+
+### `docker exec` fallback can leave processes behind
+
+**Issue**: When no `dworm up` is running for the workspace, `dworm exec` runs the
+command through `docker exec -i`. Killing the `docker exec` client does not signal
+or kill the process inside the container. `dworm exec` forwards SIGINT/SIGTERM to
+the docker CLI, but if dworm itself is killed (e.g. SIGKILL), the only remaining
+cleanup path is stdin EOF, which only works for processes that exit on EOF.
+
+**Current behavior**: Processes that ignore stdin EOF can survive their caller.
+
+**Potential fix**: Run commands over the running `dworm up` bridge so the endpoint
+owns the process group and can terminate it when the caller disconnects.
+
 ## GPG Agent Forwarding
 
 ### gpg-agent auto-respawn

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -43,6 +44,8 @@ environments.`,
 
 	// Customize version template to show full info
 	rootCmd.SetVersionTemplate(version.Info() + "\n")
+	// Errors are printed in main so commands can exit with their own codes.
+	rootCmd.SilenceErrors = true
 
 	// Global flags
 	rootCmd.PersistentFlags().StringArrayVarP(&envVars, "env", "e", nil, "Environment variables to inject (KEY=VALUE)")
@@ -133,6 +136,17 @@ environments.`,
 	}
 
 	err := rootCmd.Execute()
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		var exitErr *host.ExitError
+		if errors.As(err, &exitErr) {
+			// The command's own exit status; it already reported any error.
+			exitCode = exitErr.Code
+		} else {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
+	}
 
 	// Check for update result (non-blocking)
 	select {
@@ -145,9 +159,7 @@ environments.`,
 		// Check not complete yet, skip
 	}
 
-	if err != nil {
-		os.Exit(1)
-	}
+	os.Exit(exitCode)
 }
 
 func runOperationalCommand(runE func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {

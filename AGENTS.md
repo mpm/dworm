@@ -31,7 +31,7 @@ internal/
 │   ├── container.go        # Devcontainer lifecycle (up/down/remove/rebuild via devcontainer CLI + docker)
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
-│   ├── shell.go            # Interactive shell via docker exec (fallback)
+│   ├── shell.go            # `dworm shell`/`dworm exec` via docker exec (stdio passthrough, ExitError)
 │   ├── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
 │   └── tui/                # Terminal UI for interactive shell
 │       ├── model.go        # Main TUI session with PTY and 3-goroutine architecture
@@ -92,7 +92,7 @@ Shared constants (`internal/protocol/constants.go`):
 
 ### Host Binary (`cmd/dworm/`)
 
-Entry point uses Cobra with subcommands: `up`, `down`, `shell`, `status`, `remove`, `rebuild`
+Entry point uses Cobra with subcommands: `up`, `down`, `shell`, `exec`, `status`, `remove`, `rebuild`, `self-update`
 
 CLI flags:
 - `--version` / `-v`: Show version info (handled by Cobra)
@@ -101,6 +101,10 @@ CLI flags:
 Key flows:
 - `up`: DevcontainerUp → InjectAndStart → SendInit → handle port updates → ForwardPort
 - `down`: DevcontainerDown (finds container by label, docker stop)
+- `exec -- CMD...`: runs `docker exec -i` through the `--with-env` launcher. Stdin is always attached;
+  `-t` is added only when stdin and stdout are both terminals. stdout carries only the child's stdout
+  (all diagnostics go to stderr). The child's exit status becomes dworm's exit status
+  (`host.ExitError`, handled in `main()`); SIGINT/SIGTERM are forwarded to the docker CLI.
 - `remove [--force]`: DevcontainerRemove (finds container by label, docker stop + rm + rmi; prompts for confirmation unless `--force`)
 - `rebuild`: DevcontainerRebuild (calls `devcontainer up --remove-existing-container`; rebuilds and exits, user runs `up` separately)
 
@@ -198,6 +202,7 @@ Test files:
 - `internal/protocol/messages_test.go` - Message encoding/decoding
 - `internal/endpoint/portscanner_test.go` - /proc/net/tcp parsing, port diff logic
 - `internal/host/agent_test.go` - SSH/GPG/git credential stream routing
+- `internal/host/shell_test.go` - `docker exec` argument building, stdio/exit code passthrough (fake `docker` on PATH)
 
 **Test harness** (`internal/protocol/testutil/harness.go`):
 - Connects host and endpoint muxes over `io.Pipe()` for in-process testing
@@ -216,6 +221,7 @@ E2E scripts in `test/e2e/`:
 - `run-e2e.sh` - Main runner with Docker auto-detection
 - `test-port-forward.sh` - Port forwarding test
 - `test-env-vars.sh` - Environment variable forwarding
+- `test-exec-stdio.sh` - `dworm exec` stdin/stdout passthrough, stdin EOF, exit codes
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
 - `test-git-creds.sh` - Git credential forwarding (conditional)
