@@ -26,6 +26,7 @@ type Server struct {
 	currentPorts     []protocol.PortInfo
 	portAddresses    map[int]string // port -> best bind address for connecting
 	logger           *log.Logger
+	logWriter        *controlLogWriter
 	agentForwarder   *AgentForwarder
 	gpgForwarder     *GPGForwarder
 	gitCredForwarder *GitCredForwarder
@@ -35,11 +36,14 @@ type Server struct {
 	scanPorts        func() ([]protocol.PortInfo, error)
 }
 
-// NewServer creates a new endpoint server
+// NewServer creates a new endpoint server. It logs to stderr until init is
+// done and over the control channel afterwards; the host adds timestamps.
 func NewServer() *Server {
-	logger := log.New(os.Stderr, "[endpoint] ", log.LstdFlags)
+	logWriter := newControlLogWriter(os.Stderr)
+	logger := log.New(logWriter, "", 0)
 	return &Server{
 		logger:        logger,
+		logWriter:     logWriter,
 		portAddresses: make(map[int]string),
 		execs:         newExecManager(logger),
 		setupTimeout:  protocol.TunnelSetupTimeout,
@@ -57,7 +61,8 @@ func (s *Server) Run() error {
 	}
 
 	var err error
-	s.mux, err = protocol.NewServerMux(rwc, s.logger)
+	// yamux logs from inside the session; keep that off the control channel.
+	s.mux, err = protocol.NewServerMux(rwc, log.New(os.Stderr, "", 0))
 	if err != nil {
 		return fmt.Errorf("failed to create mux: %w", err)
 	}
@@ -111,6 +116,10 @@ func (s *Server) waitForInit() error {
 	}
 	if err := s.mux.SendControl(protocol.TypeEnvironmentReady, &protocol.EnvironmentReadyMessage{ProtocolVersion: protocol.ProtocolVersion}); err != nil {
 		return err
+	}
+	// The host reads general control messages from here on.
+	if s.logWriter != nil {
+		s.logWriter.attach(s.mux.SendControl)
 	}
 
 	// Set environment variables
@@ -464,6 +473,9 @@ func (s *Server) cleanup() {
 	}
 	if s.gitCredForwarder != nil {
 		s.gitCredForwarder.Close()
+	}
+	if s.logWriter != nil {
+		s.logWriter.detach()
 	}
 	if s.mux != nil {
 		s.mux.Close()

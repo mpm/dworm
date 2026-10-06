@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mpm/dworm/internal/protocol"
 )
 
 // Event types of the instance event stream (op "events").
@@ -38,9 +40,9 @@ const (
 	SourceHost         = "host"
 	SourceEndpoint     = "endpoint"
 	SourceDevcontainer = "devcontainer"
-	LevelInfo          = "info"
-	LevelWarn          = "warn"
-	LevelError         = "error"
+	LevelInfo          = protocol.LogLevelInfo
+	LevelWarn          = protocol.LogLevelWarn
+	LevelError         = protocol.LogLevelError
 )
 
 // Event is one entry of the instance event stream. Which fields are set
@@ -59,6 +61,7 @@ type Event struct {
 	TTY      bool        `json:"tty,omitempty"`
 	Code     int         `json:"code,omitempty"`
 	Signal   string      `json:"signal,omitempty"`
+	Error    string      `json:"error,omitempty"`
 	Attached int         `json:"attached,omitempty"`
 	Count    int         `json:"count,omitempty"`
 }
@@ -108,7 +111,8 @@ func (e Event) MarshalJSON() ([]byte, error) {
 			ID     string `json:"id"`
 			Code   int    `json:"code"`
 			Signal string `json:"signal"`
-		}{head, e.ID, e.Code, e.Signal})
+			Error  string `json:"error,omitempty"`
+		}{head, e.ID, e.Code, e.Signal, e.Error})
 	case EventClient:
 		return json.Marshal(struct {
 			eventHead
@@ -335,7 +339,7 @@ func (w *eventLogWriter) emitLocked(line, level string) {
 	if strings.TrimSpace(line) == "" {
 		return
 	}
-	if level == "" {
+	if level != LevelInfo && level != LevelWarn && level != LevelError {
 		level = inferLogLevel(line)
 	}
 	now := w.now()
@@ -349,13 +353,5 @@ func (w *eventLogWriter) emitLocked(line, level string) {
 
 // inferLogLevel classifies a free-form log line.
 func inferLogLevel(line string) string {
-	lower := strings.ToLower(line)
-	switch {
-	case strings.Contains(lower, "warning"):
-		return LevelWarn
-	case strings.Contains(lower, "error"), strings.Contains(lower, "failed"), strings.Contains(lower, "panic"):
-		return LevelError
-	default:
-		return LevelInfo
-	}
+	return protocol.InferLogLevel(line)
 }

@@ -181,7 +181,7 @@ func TestEnvironmentControlUpdates(t *testing.T) {
 		if err := h.HostMux.SendControl(protocol.TypePing, nil); err != nil {
 			t.Fatal(err)
 		}
-		kind, _, err := h.HostMux.RecvControl()
+		kind, err := recvSkippingLogs(h.HostMux)
 		if err != nil || kind != protocol.TypePong {
 			t.Fatalf("pong: %s, %v", kind, err)
 		}
@@ -192,5 +192,16 @@ func TestEnvironmentControlUpdates(t *testing.T) {
 	}
 	if got := os.Getenv("DWORM_TEST_MANAGED"); got != "container-default" {
 		t.Fatalf("removed variable = %q", got)
+	}
+}
+
+// recvSkippingLogs returns the next control message type that is not an
+// endpoint log message.
+func recvSkippingLogs(mux *protocol.Mux) (string, error) {
+	for {
+		kind, _, err := mux.RecvControl()
+		if err != nil || kind != protocol.TypeLog {
+			return kind, err
+		}
 	}
 }

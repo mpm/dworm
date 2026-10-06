@@ -123,6 +123,7 @@ func (b *fakeBridge) serve(mux *protocol.Mux) {
 	b.mu.Unlock()
 	mux.SendControl(protocol.TypeEnvironmentReady, &protocol.EnvironmentReadyMessage{ProtocolVersion: protocol.ProtocolVersion})
 	mux.SendControl(protocol.TypePortUpdate, &protocol.PortUpdateMessage{Ports: b.ports})
+	mux.SendControl(protocol.TypeLog, &protocol.LogMessage{Level: protocol.LogLevelWarn, Message: "endpoint says hi"})
 	go b.exec.serve(mux)
 	for {
 		if _, _, err := mux.RecvControl(); err != nil {
@@ -538,5 +539,49 @@ func TestInstanceStopsWhenContainerStaysDown(t *testing.T) {
 	}
 	if last.State != StateStopped || last.Reason != ReasonContainerStopped {
 		t.Fatalf("final state = %+v", last)
+	}
+}
+
+func TestInstanceEventsForExecsAndEndpointLogs(t *testing.T) {
+	f := startInstance(t, nil)
+	waitState(t, f.paths.Socket, StateReady)
+	events, err := SubscribeEvents(f.paths.Socket, EventHistorySize, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+	ExecViaSocket(f.paths.Socket, protocol.ExecRequest{Argv: []string{"cat", "-n"}}, strings.NewReader(""), io.Discard, io.Discard)
+
+	var started, exited Event
+	var endpointLog bool
+	var attached []int
+	for exited.ID == "" {
+		e, err := events.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case e.Type == EventLog && e.Source == SourceEndpoint && e.Message == "endpoint says hi":
+			endpointLog = e.Level == LevelWarn
+		case e.Type == EventExecStarted:
+			started = e
+		case e.Type == EventExecExited:
+			exited = e
+		case e.Type == EventClient:
+			attached = append(attached, e.Attached)
+		}
+	}
+	if !endpointLog {
+		t.Fatal("endpoint log message did not become a warn log event from source endpoint")
+	}
+	if started.ID == "" || started.ID != exited.ID || strings.Join(started.Argv, " ") != "cat -n" || started.TTY {
+		t.Fatalf("exec_started = %+v, exec_exited = %+v", started, exited)
+	}
+	if exited.Code != 3 || exited.Signal != "" {
+		t.Fatalf("exec_exited = %+v, want code 3", exited)
+	}
+	// The subscription itself (1), then the exec (2), then back to 1.
+	if fmt.Sprint(attached) != "[1 2 1]" {
+		t.Fatalf("client events = %v", attached)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,9 @@ var (
 	ensureTimeout time.Duration
 	noStart       bool
 	noBridge      bool
+	logsFollow    bool
+	logsJSON      bool
+	logsLines     int
 	crStderr      = protocol.NewLogWriter(os.Stderr)
 	crStdout      = protocol.NewLogWriter(os.Stdout)
 	logger        = log.New(crStderr, "", log.LstdFlags)
@@ -149,6 +153,21 @@ without a terminal, it waits until the instance is ready and exits.`,
 	execCmd.Flags().BoolVar(&noBridge, "no-bridge", false, "Run through plain `docker exec` instead of the instance (no forwarding, no process cleanup)")
 	addEnsureFlags(execCmd)
 	rootCmd.AddCommand(execCmd)
+
+	logsCmd := &cobra.Command{
+		Use:   "logs",
+		Short: "Show the workspace instance's log and events",
+		Long: `Show recent log lines of the workspace instance, then exit. With -f, keep
+following its events (starting the instance if needed). --json prints the raw
+event stream (state, ports, log, exec_started, exec_exited, client, dropped).`,
+		Args: cobra.NoArgs,
+		RunE: runOperationalCommand(runLogs),
+	}
+	logsCmd.Flags().BoolVarP(&logsFollow, "follow", "f", false, "Follow new events (starts the instance if needed)")
+	logsCmd.Flags().BoolVar(&logsJSON, "json", false, "Print events as JSON lines")
+	logsCmd.Flags().IntVarP(&logsLines, "lines", "n", 100, fmt.Sprintf("Number of recent log lines to show (max %d)", host.EventHistorySize))
+	addEnsureFlags(logsCmd)
+	rootCmd.AddCommand(logsCmd)
 
 	// Status command
 	statusCmd := &cobra.Command{
@@ -586,6 +605,102 @@ func runRebuild(cmd *cobra.Command, args []string) error {
 
 	logger.Printf("Container rebuilt: %s", containerInfo.ContainerName)
 	return nil
+}
+
+func runLogs(cmd *cobra.Command, args []string) error {
+	if logsLines < 0 || logsLines > host.EventHistorySize {
+		return fmt.Errorf("--lines must be between 0 and %d", host.EventHistorySize)
+	}
+	workspacePath, err := getWorkspacePath()
+	if err != nil {
+		return err
+	}
+	paths := host.InstancePathsFor(workspacePath)
+	socket := paths.Socket
+	if logsFollow {
+		state, err := ensureInstance(cmd, false)
+		if err != nil {
+			return err
+		}
+		socket = state.ExecSocket
+	} else if running, err := host.InstanceRunning(paths); err != nil {
+		return err
+	} else if !running {
+		hint := ""
+		if _, err := os.Stat(paths.Log); err == nil {
+			hint = fmt.Sprintf(" (the last detached instance logged to %s)", paths.Log)
+		}
+		return fmt.Errorf("no dworm instance is running for %s%s", workspacePath, hint)
+	}
+
+	events, err := host.SubscribeEvents(socket, logsLines, logsFollow)
+	if err != nil {
+		return err
+	}
+	defer events.Close()
+	out := bufio.NewWriter(os.Stdout)
+	defer out.Flush()
+	for {
+		line, err := events.NextRaw()
+		if err != nil {
+			return nil // the instance ended the stream
+		}
+		if logsJSON {
+			out.Write(append(line, '\n'))
+		} else {
+			var event host.Event
+			if json.Unmarshal(line, &event) != nil {
+				continue
+			}
+			fmt.Fprintln(out, formatEvent(event))
+		}
+		if logsFollow {
+			out.Flush()
+		}
+	}
+}
+
+// formatEvent renders an event for `dworm logs`.
+func formatEvent(e host.Event) string {
+	ts := e.T.Local().Format("2006-01-02 15:04:05")
+	switch e.Type {
+	case host.EventLog:
+		return fmt.Sprintf("%s [%s] %s", ts, e.Source, e.Message)
+	case host.EventState:
+		if e.Reason != "" {
+			return fmt.Sprintf("%s state: %s (%s)", ts, e.State, e.Reason)
+		}
+		return fmt.Sprintf("%s state: %s", ts, e.State)
+	case host.EventPorts:
+		ports := make([]string, len(e.Ports))
+		for i, p := range e.Ports {
+			ports[i] = fmt.Sprintf("%s:%d->%d", p.Address, p.LocalPort, p.Port)
+		}
+		if len(ports) == 0 {
+			return ts + " ports: none"
+		}
+		return ts + " ports: " + strings.Join(ports, " ")
+	case host.EventExecStarted:
+		tty := ""
+		if e.TTY {
+			tty = " (tty)"
+		}
+		return fmt.Sprintf("%s exec %s started: %s%s", ts, e.ID, strings.Join(e.Argv, " "), tty)
+	case host.EventExecExited:
+		switch {
+		case e.Error != "":
+			return fmt.Sprintf("%s exec %s ended: %s", ts, e.ID, e.Error)
+		case e.Signal != "":
+			return fmt.Sprintf("%s exec %s exited: signal %s", ts, e.ID, e.Signal)
+		default:
+			return fmt.Sprintf("%s exec %s exited: code %d", ts, e.ID, e.Code)
+		}
+	case host.EventClient:
+		return fmt.Sprintf("%s clients attached: %d", ts, e.Attached)
+	case host.EventDropped:
+		return fmt.Sprintf("%s (%d events dropped)", ts, e.Count)
+	}
+	return fmt.Sprintf("%s %s", ts, e.Type)
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {

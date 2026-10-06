@@ -21,7 +21,7 @@ test/e2e/                   # E2E test scripts (require Docker)
 
 internal/
 ├── protocol/               # Shared between host and endpoint
-│   ├── messages.go         # JSON message types (Init, PortUpdate), stream markers, ProtocolVersion
+│   ├── messages.go         # JSON message types (Init, PortUpdate, Log), stream markers, ProtocolVersion
 │   ├── exec.go             # Exec stream framing, ExecRequest/Reply/Exit, limits
 │   ├── mux.go              # Yamux wrapper for multiplexing over stdin/stdout
 │   ├── proxy.go            # BiProxy utility for bidirectional data copying
@@ -59,7 +59,8 @@ internal/
 │   ├── agent.go            # SSH agent forwarding (Unix socket listener)
 │   ├── gpg.go              # GPG agent forwarding (Unix socket listener)
 │   ├── gitconfig.go        # Git config file writing and credential helper setup
-│   └── gitcred.go          # Git credential forwarding (Unix socket + helper client)
+│   ├── gitcred.go          # Git credential forwarding (Unix socket + helper client)
+│   └── logwriter.go        # Endpoint log lines → TypeLog control messages (stderr before init)
 └── version/                # Version info and update checking
     ├── version.go          # Version variables (set via ldflags at build time)
     └── check.go            # GitHub API version check for update notifications
@@ -74,7 +75,7 @@ internal/
 - **Other streams**: Stream 1+. Every stream starts with a 1-byte type marker. Host-opened:
   `StreamTypeTunnel` (0x10, TCP tunnel), `StreamTypeExec` (0x11, process execution).
   Endpoint-opened: `StreamTypeAgent`/`GPG`/`GitCred` (0x01-0x03)
-- **Protocol version**: `protocol.ProtocolVersion` (currently 2) is sent in `InitMessage.ProtocolVersion`
+- **Protocol version**: `protocol.ProtocolVersion` (currently 3) is sent in `InitMessage.ProtocolVersion`
   and echoed in `environment_ready` (`EnvironmentReadyMessage`). The endpoint rejects a mismatch with
   `init_error`; the host rejects a missing/mismatched echo. Host and endpoint always come from the same
   build (the endpoint is embedded and injected on every `up`); bump the version on any incompatible
@@ -84,6 +85,9 @@ internal/
 Message types:
 - `InitMessage`: env vars, agent forwarding config, GPG public keys, protocol version
 - `environment_ready` / `init_error`: endpoint's answer to init
+- `log` (`LogMessage`: `level` info/warn/error, `message`): endpoint log lines, sent only after
+  `environment_ready` (before that, and when its 256-line queue is full, the endpoint logs to stderr,
+  which the host also collects). The host turns them into `log` events with `source: endpoint`.
 - `PortUpdateMessage`: contains `[]PortInfo` where each `PortInfo` has `Port int` and `Address string` (bind address)
 
 Message flow:
@@ -125,7 +129,7 @@ Shared constants (`internal/protocol/constants.go`):
 
 ### Host Binary (`cmd/dworm/`)
 
-Entry point uses Cobra with subcommands: `up`, `stop`, `down`, `shell`, `exec`, `status`, `remove`, `rebuild`,
+Entry point uses Cobra with subcommands: `up`, `stop`, `down`, `shell`, `exec`, `logs`, `status`, `remove`, `rebuild`,
 `self-update`, and the hidden `__instance` (a detached instance, started by `ensure`)
 
 CLI flags:
@@ -149,6 +153,7 @@ Key flows (see "Instance lifecycle" below):
 - `--no-start` (`shell`, `exec`): fail instead of starting a stopped container. `-v/--verbose` shows
   startup progress also when stderr is not a terminal; `--timeout` (default 15m) bounds the wait.
 - `status [--json]`: `host.GetStatus` (see below). Exits 0 when there is no container or no instance.
+- `logs [-f] [--json] [-n N]`: the instance's events (see "Event stream").
 - `remove [--force]`: DevcontainerRemove (finds container by label, docker stop + rm + rmi; prompts for confirmation unless `--force`)
 - `rebuild`: DevcontainerRebuild (calls `devcontainer up --remove-existing-container`; rebuilds and exits, user runs `up` separately)
 
@@ -192,9 +197,16 @@ frame's code becomes dworm's exit code.
 
 After `{"ok":true}`, newline-delimited JSON. First a snapshot (current `state`, current `ports`, the
 last `history` log events from a ring buffer of 500), then live events unless `"follow":false`:
-`state` (`state`, `reason`), `ports` (`ports`), `log` (`source`, `level`, `message`). Each subscriber
-has a bounded queue (256); on overflow events are dropped and `{"type":"dropped","count":N}` is sent
-once there is room. Publishing never blocks the instance.
+`state` (`state`, `reason`), `ports` (`ports`), `log` (`source` host/endpoint/devcontainer, `level`,
+`message`), `exec_started` (`id`, `argv`, `tty`), `exec_exited` (`id`, `code`, `signal`, optional
+`error`: `bridge lost`, or `caller disconnected` with code -1), `client` (`attached`: open exec sessions
+plus event subscriptions). Each subscriber has a bounded queue (256); on overflow events are dropped
+and `{"type":"dropped","count":N}` is sent once there is room. Publishing never blocks the instance.
+Raw-mode exec stderr lines (`[exec <id>] …`, rate limited) are host log events.
+
+`dworm logs [-f] [--json] [-n N]` prints the snapshot (`-n` log lines, default 100) in human-readable
+form or as raw JSON lines; `-f` ensures the instance and follows. Without `-f` and without a running
+instance it exits 1.
 
 ### Instance lifecycle (`internal/host/instancerun.go`, `ensure.go`, `instance.go`)
 
@@ -371,6 +383,9 @@ Test files:
 - `internal/host/ensure_test.go` - Concurrent ensures share one instance, version mismatch, env warning,
   `--no-start`
 - `internal/host/events_test.go` - Event bus snapshot/live/history, slow-subscriber drop marker, JSON shape
+- `internal/endpoint/server_test.go` - also: logs switch to the control channel after init, first port
+  report even when empty
+- `cmd/dworm/main_test.go` - usage on errors, `dworm logs` event formatting
 - `internal/host/status_test.go` - Status JSON shape, metadata/remote user parsing (fake `docker`)
 - `internal/protocol/exec_test.go` - Exec frame/message encoding and size limits
 - `internal/endpoint/exec_test.go` - Exec streams over the harness: stdio, env/cwd, signals, exit codes,
@@ -483,6 +498,7 @@ Host: yamux stream → git credential fill/approve/reject → response
 ## Error Handling Patterns
 
 - Host logs to stderr with `[host]` prefix
-- Endpoint logs to stderr with `[endpoint]` prefix (visible on host via docker exec stderr)
+- Endpoint logs go over the control channel (`TypeLog`); the host writes them with an `[endpoint]`
+  prefix and publishes them as `log` events. Its stderr (startup, crashes) is collected the same way.
 - Tunnel manager logs with `[tunnel]` prefix
 - Control channel EOF is normal on shutdown

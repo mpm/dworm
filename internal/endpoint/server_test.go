@@ -1,10 +1,12 @@
 package endpoint
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -140,6 +142,66 @@ func TestFirstPortReportIsSentWhenEmpty(t *testing.T) {
 	if sends != 1 {
 		t.Fatalf("sends = %d, want exactly the first (empty) report", sends)
 	}
+}
+
+func TestLogsGoOverControlChannelAfterInit(t *testing.T) {
+	old := environmentDir
+	environmentDir = filepath.Join(t.TempDir(), "dworm")
+	t.Cleanup(func() { environmentDir = old })
+	h, err := testutil.NewTestHarness()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	var stderr syncBuffer
+	server := NewServer()
+	server.logWriter.stderr = &stderr
+	server.mux = h.EndpointMux
+	server.logger.Printf("before init")
+	go server.waitForInit()
+	h.HostMux.SendControl(protocol.TypeInit, &protocol.InitMessage{ProtocolVersion: protocol.ProtocolVersion})
+	if kind, _, err := h.HostMux.RecvControl(); err != nil || kind != protocol.TypeEnvironmentReady {
+		t.Fatalf("first message = %s, %v; want environment_ready", kind, err)
+	}
+	waitLog := func(want string) protocol.LogMessage {
+		t.Helper()
+		for {
+			kind, data, err := h.HostMux.RecvControl()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var msg protocol.LogMessage
+			if kind == protocol.TypeLog && json.Unmarshal(data, &msg) == nil && msg.Message == want {
+				return msg
+			}
+		}
+	}
+	// waitForInit logs this last, after switching to the control channel.
+	waitLog("Initialized with 0 env vars")
+	server.logger.Printf("Warning: after init")
+	if msg := waitLog("Warning: after init"); msg.Level != protocol.LogLevelWarn {
+		t.Fatalf("level = %q", msg.Level)
+	}
+	if got := stderr.String(); got != "before init\n" {
+		t.Fatalf("stderr = %q, want only the line before init", got)
+	}
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestPortScanFailurePreservesCurrentSnapshot(t *testing.T) {

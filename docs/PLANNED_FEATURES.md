@@ -2,7 +2,9 @@
 
 ## Protocol-based Logging
 
-**Status:** Planned
+**Status:** Implemented in v0.8.0 (`TypeLog`, protocol version 3). Endpoint lines become `log` events
+of the instance (`dworm logs`). Still open: verbosity levels (`--quiet`/`--verbose` for the
+instance log) and colored output.
 
 **Problem:**
 

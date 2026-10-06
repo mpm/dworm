@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -96,7 +97,7 @@ type Instance struct {
 
 	bus             *EventBus
 	hostLog         *eventLogWriter
-	endpointStderr  *eventLogWriter
+	endpointLog     *eventLogWriter // TypeLog messages and endpoint stderr
 	devcontainerLog *eventLogWriter
 	logger          *log.Logger
 
@@ -148,7 +149,7 @@ func (i *Instance) setOutput(out io.Writer) {
 		out = io.Discard
 	}
 	i.hostLog = newEventLogWriter(i.bus, out, SourceHost, "")
-	i.endpointStderr = newEventLogWriter(i.bus, out, SourceEndpoint, "")
+	i.endpointLog = newEventLogWriter(i.bus, out, SourceEndpoint, "[endpoint] ")
 	i.devcontainerLog = newEventLogWriter(i.bus, out, SourceDevcontainer, "[devcontainer] ")
 	i.logger = log.New(i.hostLog, "", 0)
 }
@@ -436,7 +437,7 @@ func (i *Instance) goBackground(f func()) {
 // connect starts an endpoint, initializes it, and starts reading its control
 // messages.
 func (i *Instance) connect(containerID string) (*bridgeSession, error) {
-	conn, err := i.deps.startEndpoint(context.Background(), containerID, i.hostLog, i.endpointStderr)
+	conn, err := i.deps.startEndpoint(context.Background(), containerID, i.hostLog, i.endpointLog)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start endpoint: %w", err)
 	}
@@ -489,6 +490,13 @@ func (i *Instance) readControl(session *bridgeSession) {
 				continue
 			}
 			i.tunnels.UpdatePorts(portMsg.Ports)
+		case protocol.TypeLog:
+			var msg protocol.LogMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				i.logger.Printf("Failed to decode endpoint log message: %v", err)
+				continue
+			}
+			i.endpointLog.Log(msg.Level, msg.Message)
 		}
 	}
 }

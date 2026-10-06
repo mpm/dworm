@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Message types
@@ -14,6 +15,7 @@ const (
 	TypeEnvironment      = "environment"
 	TypeEnvironmentReady = "environment_ready"
 	TypeInitError        = "init_error"
+	TypeLog              = "log" // endpoint → host: LogMessage
 )
 
 // ProtocolVersion is bumped on incompatible bridge changes. Host and endpoint
@@ -22,7 +24,8 @@ const (
 // streams.
 //
 // Version 2: host-opened streams start with a stream type marker.
-const ProtocolVersion = 2
+// Version 3: endpoint log messages travel over the control channel (TypeLog).
+const ProtocolVersion = 3
 
 // Stream type markers (first byte of every yamux stream except the control stream)
 const (
@@ -63,6 +66,32 @@ type EnvironmentReadyMessage struct {
 // InitErrorMessage reports why the endpoint rejected init.
 type InitErrorMessage struct {
 	Error string `json:"error"`
+}
+
+// Log levels of LogMessage.
+const (
+	LogLevelInfo  = "info"
+	LogLevelWarn  = "warn"
+	LogLevelError = "error"
+)
+
+// LogMessage is an endpoint log line, sent after environment_ready.
+type LogMessage struct {
+	Level   string `json:"level"`
+	Message string `json:"message"`
+}
+
+// InferLogLevel classifies a free-form log line.
+func InferLogLevel(line string) string {
+	lower := strings.ToLower(line)
+	switch {
+	case strings.Contains(lower, "warning"):
+		return LogLevelWarn
+	case strings.Contains(lower, "error"), strings.Contains(lower, "failed"), strings.Contains(lower, "panic"):
+		return LogLevelError
+	default:
+		return LogLevelInfo
+	}
 }
 
 // PortInfo represents a listening port with its bind address

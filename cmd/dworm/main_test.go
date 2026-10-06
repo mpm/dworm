@@ -5,7 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/mpm/dworm/internal/host"
 	"github.com/spf13/cobra"
 )
 
@@ -54,4 +56,24 @@ func newTestCommand(runE func(*cobra.Command, []string) error) *cobra.Command {
 		RunE: runOperationalCommand(runE),
 	})
 	return root
+}
+
+func TestFormatEvent(t *testing.T) {
+	ts := time.Date(2026, 10, 7, 10, 0, 0, 0, time.Local)
+	for _, tt := range []struct {
+		event host.Event
+		want  string
+	}{
+		{host.Event{Type: host.EventLog, Source: "endpoint", Message: "hello"}, "[endpoint] hello"},
+		{host.Event{Type: host.EventState, State: "reconnecting", Reason: "bridge_lost"}, "state: reconnecting (bridge_lost)"},
+		{host.Event{Type: host.EventPorts, Ports: []host.StatePort{{Port: 3000, Address: "127.0.0.1", LocalPort: 3001}}}, "ports: 127.0.0.1:3001->3000"},
+		{host.Event{Type: host.EventExecStarted, ID: "ab", Argv: []string{"opencode", "acp"}}, "exec ab started: opencode acp"},
+		{host.Event{Type: host.EventExecExited, ID: "ab", Code: 255, Error: "bridge lost"}, "exec ab ended: bridge lost"},
+		{host.Event{Type: host.EventExecExited, ID: "ab", Code: 143, Signal: "TERM"}, "exec ab exited: signal TERM"},
+	} {
+		tt.event.T = ts
+		if got := formatEvent(tt.event); got != "2026-10-07 10:00:00 "+tt.want {
+			t.Errorf("formatEvent = %q, want %q", got, tt.want)
+		}
+	}
 }

@@ -143,8 +143,12 @@ func (s *ExecServer) attach(delta int) {
 	s.clients += delta
 	attached := s.clients
 	s.mu.Unlock()
+	s.publish(Event{Type: EventClient, Attached: attached})
+}
+
+func (s *ExecServer) publish(e Event) {
 	if s.cfg.Events != nil {
-		s.cfg.Events.Publish(Event{Type: EventClient, Attached: attached})
+		s.cfg.Events.Publish(e)
 	}
 }
 
@@ -455,8 +459,8 @@ func (s *ExecServer) handleExec(conn *net.UnixConn, reader *bufio.Reader, req *p
 		return
 	}
 	s.logger.Printf("[exec %s] Started %q (%s mode)", req.ID, req.Argv[0], mode)
+	s.publish(Event{Type: EventExecStarted, ID: req.ID, Argv: req.Argv})
 	s.attach(1)
-	defer s.attach(-1)
 
 	var exit *protocol.ExecExit
 	if mode == protocol.ExecModeRaw {
@@ -464,6 +468,12 @@ func (s *ExecServer) handleExec(conn *net.UnixConn, reader *bufio.Reader, req *p
 	} else {
 		exit = s.proxyFramed(conn, reader, stream, req.ID)
 	}
+	s.attach(-1)
+	exited := Event{Type: EventExecExited, ID: req.ID, Code: -1, Error: "caller disconnected"}
+	if exit != nil {
+		exited.Code, exited.Signal, exited.Error = exit.Code, exit.Signal, exit.Error
+	}
+	s.publish(exited)
 	switch {
 	case exit == nil:
 		s.logger.Printf("[exec %s] Ended without exit status (caller or bridge disconnected)", req.ID)
