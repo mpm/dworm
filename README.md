@@ -156,6 +156,27 @@ with its PID, container, workspace folder, connection state, and forwarded ports
 true only while a `dworm up` holds the workspace lock. Both cases exit 0; non-zero
 exit codes mean dworm could not determine the status (e.g. Docker is unavailable).
 
+### Exec socket for other programs
+
+Each running `dworm up` listens on a unix socket (`exec_socket` in
+`dworm status --json`, mode `0600`, same user only). One connection runs one
+process in the container, with the published dworm environment:
+
+```text
+→ {"version":1, "argv":["opencode","acp"], "cwd":"/workspaces/app", "env":{"FOO":"bar"}, "mode":"raw"}
+← {"ok":true,"id":"3f9a1c2b7d10"}            or  {"ok":false,"error":"…"}
+```
+
+`cwd` defaults to the workspace folder and `env` overrides the dworm environment.
+In `raw` mode the connection is then a plain byte stream: your bytes are the
+process's stdin, half-closing the connection (`shutdown(SHUT_WR)`) is stdin EOF,
+and you receive only its stdout. stderr goes to dworm's log as `[exec <id>]`
+lines. When the process exits and its stdout is drained, dworm closes the
+connection (raw mode has no exit code). Closing the connection before the
+process exits terminates its process group. `framed` mode (used by `dworm exec`)
+carries stdin, stdout, stderr, signals, and the exit status as frames; see
+`AGENTS.md`. Up to 32 processes can run concurrently per container.
+
 ### Project environment and host startup commands
 
 Place optional `.dworm.config` and `.dworm.env` files in the workspace directory
@@ -264,6 +285,12 @@ dworm remove --force  # skip confirmation
 dworm rebuild
 ```
 
+While a `dworm up` runs for the workspace, `dworm exec` without a terminal runs
+the command over its existing bridge instead of a new `docker exec`. The endpoint
+then owns the process group: if the caller disappears (even via SIGKILL), the
+process group gets SIGTERM and, after 5 seconds, SIGKILL. Terminal sessions
+(`dworm exec -- bash` in a terminal) still use `docker exec -it`.
+
 `dworm shell` and `dworm exec` start in the container's workspace folder (the
 in-container path of the project directory), unless `dworm exec --workdir/-w`
 selects another directory. `dworm exec` always forwards stdin, allocates a TTY
@@ -346,7 +373,9 @@ developer@container:~$ git push origin main
 
 1. **dworm** (host) loads project environment configuration, runs the configured host command, and then starts the devcontainer using the devcontainer CLI
 2. It injects **dworm_endpoint** binary into the container
-3. Host and endpoint communicate over stdin/stdout of `docker exec`
+3. Host and endpoint communicate over stdin/stdout of `docker exec`; the same
+   bridge carries port tunnels, agent/credential forwarding, and `dworm exec`
+   processes
 4. Endpoint scans `/proc/net/tcp` for listening ports and reports changes
 5. Host binds matching ports locally and tunnels traffic through the multiplexed connection
 6. The endpoint publishes a shared environment snapshot for dworm shells and commands; scheduled host-command runs replace that snapshot
@@ -428,5 +457,5 @@ MIT
 
 ## Releases
 
-See the [v0.5.0 release notes](docs/releases/v0.5.0.md) and the
-[maintainer release guide](docs/RELEASING.md).
+See the [v0.7.0 release notes](docs/releases/v0.7.0.md), earlier notes in
+[docs/releases](docs/releases/), and the [maintainer release guide](docs/RELEASING.md).

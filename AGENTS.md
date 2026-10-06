@@ -21,7 +21,8 @@ test/e2e/                   # E2E test scripts (require Docker)
 
 internal/
 ├── protocol/               # Shared between host and endpoint
-│   ├── messages.go         # JSON message types (Init, PortUpdate)
+│   ├── messages.go         # JSON message types (Init, PortUpdate), stream markers, ProtocolVersion
+│   ├── exec.go             # Exec stream framing, ExecRequest/Reply/Exit, limits
 │   ├── mux.go              # Yamux wrapper for multiplexing over stdin/stdout
 │   ├── proxy.go            # BiProxy utility for bidirectional data copying
 │   ├── constants.go        # Shared constants (socket paths, limits)
@@ -32,6 +33,9 @@ internal/
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
 │   ├── instance.go         # Per-workspace flock, runtime dir, state file (instance_unix.go: flock)
+│   ├── execserver.go       # Local exec unix socket (raw/framed clients → bridge exec streams)
+│   ├── execserver_linux.go # SO_PEERCRED check, POLLHUP disconnect detection for raw mode
+│   ├── execclient.go       # `dworm exec` client for the exec socket (framed mode)
 │   ├── status.go           # `dworm status` data (GetStatus, RunningInstance, WorkspaceFolder)
 │   ├── shell.go            # `dworm shell`/`dworm exec` via docker exec (stdio passthrough, ExitError)
 │   ├── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
@@ -42,7 +46,8 @@ internal/
 │       ├── styles.go       # lipgloss style definitions
 │       └── fallback.go     # Non-TTY fallback mode
 ├── endpoint/               # Container-side only
-│   ├── server.go           # Main server loop, handles control messages
+│   ├── server.go           # Main server loop, handles control messages, dispatches host-opened streams
+│   ├── exec.go             # Exec streams: spawns processes in own process groups, kills on disconnect
 │   ├── portscanner.go      # Scans /proc/net/tcp for listening ports
 │   ├── env.go              # Environment variable handling
 │   ├── agent.go            # SSH agent forwarding (Unix socket listener)
@@ -60,18 +65,26 @@ internal/
 
 - **Multiplexing**: Uses `github.com/hashicorp/yamux` over stdin/stdout
 - **Control channel**: Stream 0, length-prefixed JSON messages (max 1MB via `MaxControlMessageSize`)
-- **Tunnel streams**: Stream 1+, raw TCP proxy data
+- **Other streams**: Stream 1+. Every stream starts with a 1-byte type marker. Host-opened:
+  `StreamTypeTunnel` (0x10, TCP tunnel), `StreamTypeExec` (0x11, process execution).
+  Endpoint-opened: `StreamTypeAgent`/`GPG`/`GitCred` (0x01-0x03)
+- **Protocol version**: `protocol.ProtocolVersion` (currently 2) is sent in `InitMessage.ProtocolVersion`
+  and echoed in `environment_ready` (`EnvironmentReadyMessage`). The endpoint rejects a mismatch with
+  `init_error`; the host rejects a missing/mismatched echo. Host and endpoint always come from the same
+  build (the endpoint is embedded and injected on every `up`); bump the version on any incompatible
+  stream or message change.
 - **BiProxy utility**: `protocol.BiProxy(conn1, conn2)` handles bidirectional copying with proper shutdown
 
 Message types:
-- `InitMessage`: env vars, agent forwarding config, GPG public keys
+- `InitMessage`: env vars, agent forwarding config, GPG public keys, protocol version
+- `environment_ready` / `init_error`: endpoint's answer to init
 - `PortUpdateMessage`: contains `[]PortInfo` where each `PortInfo` has `Port int` and `Address string` (bind address)
 
 Message flow:
 1. Host sends `init` with env vars, agent forwarding config, and GPG public keys
 2. Endpoint sends `port_update` when listening ports change (includes bind addresses)
 3. Host opens new yamux stream for each tunnel connection
-4. Stream header: 4-byte port number, 1-byte success response
+4. Stream header: `StreamTypeTunnel`, 4-byte port number; endpoint replies with 1-byte success response
 
 Agent/credential forwarding (reverse direction, endpoint → host):
 - Stream type markers: `StreamTypeAgent` (0x01) for SSH, `StreamTypeGPG` (0x02) for GPG, `StreamTypeGitCred` (0x03) for git credentials
@@ -79,6 +92,17 @@ Agent/credential forwarding (reverse direction, endpoint → host):
 - GPG: Host exports public keys via `gpg --export --armor`, sends in `InitMessage.GPGPublicKeys`. Endpoint imports them via `gpg --import` before starting forwarder. Endpoint runs `gpgconf --list-dirs agent-socket` to find expected path (e.g., `~/.gnupg/S.gpg-agent`), kills existing agent, creates socket there
 - Git: Endpoint creates socket at `protocol.GitCredentialSocket`, creates helper script at `protocol.GitCredentialHelperPath`, configures git to use it
 - On client connect: endpoint opens yamux stream to host with type marker, host proxies to local agent socket (SSH/GPG) or runs `git credential` command (git)
+
+Exec streams (host → endpoint, `exec.go`):
+1. Host writes `StreamTypeExec`, then a length-prefixed (4-byte BE) JSON `ExecRequest`
+   (`argv`, `cwd`, `env`, `id`; max `MaxExecHeaderSize` = 64KB)
+2. Endpoint replies with a length-prefixed `ExecReply` (`ok`, `error`, `exit_code` = 127/126 when the
+   command can't be started; also used for limits: `MaxConcurrentExecs` = 32)
+3. Then frames `[1 byte type][4 byte BE length][payload]` (max 1MB): `0x00` stdin, `0x01` stdout,
+   `0x02` stderr, `0x03` stdin EOF, `0x04` exit (`{"code":N,"signal":"TERM"}`, last frame; signals
+   report code 128+n), `0x05` signal (`{"signal":"TERM"}`, sent to the process group)
+4. A stream closed/reset before the exit frame is a kill request: SIGTERM to the process group,
+   SIGKILL after `ExecKillGrace` (5s). The endpoint does the same for all execs when the bridge ends.
 
 Shared constants (`internal/protocol/constants.go`):
 - `SSHAgentSocketPath`, `GPGAgentSocketPath`, `GitCredentialSocket`, `GitCredentialHelperPath`
@@ -108,12 +132,41 @@ Key flows:
   containing the workspace path, mapped into the container; "" = image default). `exec --workdir/-w`
   overrides it.
 - `status [--json]`: `host.GetStatus` (see below). Exits 0 when there is no container or no `up`.
-- `exec -- CMD...`: runs `docker exec -i` through the `--with-env` launcher. Stdin is always attached;
+- `exec -- CMD...`: without a TTY and with a running `up`, runs over the exec socket (see "Exec over the
+  bridge"). Otherwise runs `docker exec -i` through the `--with-env` launcher. Stdin is always attached;
   `-t` is added only when stdin and stdout are both terminals. stdout carries only the child's stdout
   (all diagnostics go to stderr). The child's exit status becomes dworm's exit status
   (`host.ExitError`, handled in `main()`); SIGINT/SIGTERM are forwarded to the docker CLI.
 - `remove [--force]`: DevcontainerRemove (finds container by label, docker stop + rm + rmi; prompts for confirmation unless `--force`)
 - `rebuild`: DevcontainerRebuild (calls `devcontainer up --remove-existing-container`; rebuilds and exits, user runs `up` separately)
+
+### Exec over the bridge (`internal/host/execserver.go`, `internal/endpoint/exec.go`)
+
+Every running `dworm up` (TUI and daemon) listens on `<runtime dir>/<hash>.sock` (mode 0600, removed on
+exit, path in the state file as `exec_socket`). On Linux, `SO_PEERCRED` restricts it to the same UID.
+
+Client protocol (one connection = one process):
+- Client sends one JSON line: `{"version":1, "argv":[...], "cwd":"...", "env":{...}, "mode":"raw"|"framed"}`.
+  Unknown fields are rejected; `cwd` defaults to the workspace folder; `env` is merged over the
+  published dworm environment exactly like `--with-env` (inherited env → published snapshot → `env`);
+  `mode` defaults to `raw`.
+- Host replies with one JSON line: `{"ok":true,"id":"<12 hex>"}` or `{"ok":false,"error":"…"}` (then
+  closes; `exit_code` 127/126 when the command could not be started).
+- `raw`: afterwards a plain byte stream. Client bytes = stdin, client half-close (`shutdown(SHUT_WR)`) =
+  stdin EOF, host→client bytes = stdout only. stderr goes to dworm's log as `[exec <id>] line`
+  (line-buffered, ≤50 lines/s, then a suppression notice). After the exit frame and drained stdout,
+  the host closes the connection; there is no exit code. A full disconnect (detected via POLLHUP on
+  Linux, so it differs from a half-close) kills the process.
+- `framed`: the bridge frames are passed through (client may send stdin/stdin-EOF/signal; receives
+  stdout/stderr/exit). Socket EOF before the exit frame kills the process.
+- Kill request = the host closes the bridge stream; the endpoint terminates the process group.
+
+The endpoint spawns with `Setpgid`, as the endpoint's user, resolving `argv[0]` with the merged `PATH`.
+
+`dworm exec` uses the socket in framed mode when stdin and stdout are not both terminals and
+`RunningInstance` reports an `exec_socket`; otherwise (or on `ErrExecSocketUnavailable` before the
+command started) it falls back to `docker exec -i[t]`. TTY sessions always use docker (`-t`). The
+client forwards SIGINT/SIGTERM/SIGHUP as signal frames; the exit frame's code becomes dworm's exit code.
 
 ### `dworm up` instance lock, state file, and lifecycle (`internal/host/instance.go`)
 
@@ -127,8 +180,9 @@ Key flows:
 - State file `<hash>.json`, rewritten atomically (temp file + rename) by `StateFile.Update`, removed
   on exit. Fields: `pid`, `workspace_path`, `container_id`, `container_name`, `remote_user`,
   `workspace_folder` (in-container path), `started_at`, `endpoint_connected`, `ports`
-  (`[{port, address, local_port}]`: container port, host bind address, host port). Updated after
-  container start, endpoint init, every forwarded-port change, and on bridge failure.
+  (`[{port, address, local_port}]`: container port, host bind address, host port), `exec_socket`.
+  Updated after container start, endpoint init, exec socket start, every forwarded-port change, and on
+  bridge failure.
   Only trust it while the lock is held.
 - Signals: `stopCtx` (SIGINT/SIGTERM) → clean shutdown, exit 0, container keeps running.
   Bridge failure (control stream EOF) → exit 1 so systemd `Restart=on-failure` restarts it. Because
@@ -149,7 +203,7 @@ Fields (all always present unless noted):
   - `workspace_folder`: from the running `up`'s state, else the bind-mount heuristic
 - `up`: `running` (true only if the lock is held, checked with a non-blocking flock),
   `endpoint_connected`, `ports` (`[{port, address, local_port}]`, `[]` when not running), and when
-  running `pid`, `started_at` (RFC 3339, omitted if unknown)
+  running `pid`, `started_at` (RFC 3339, omitted if unknown), `exec_socket` (omitted if disabled)
 - `dworm_version`: `version.Version`
 
 The human-readable output (default) shows the same information.
@@ -250,6 +304,11 @@ Test files:
 - `internal/host/agent_test.go` - SSH/GPG/git credential stream routing
 - `internal/host/instance_test.go` - Instance lock exclusivity/probing, state file
 - `internal/host/status_test.go` - Status JSON shape, metadata/remote user parsing (fake `docker`)
+- `internal/protocol/exec_test.go` - Exec frame/message encoding and size limits
+- `internal/endpoint/exec_test.go` - Exec streams over the harness: stdio, env/cwd, signals, exit codes,
+  rejections/limits, concurrency, process-group kill on disconnect and shutdown
+- `internal/host/execserver_test.go` - Exec socket against a fake endpoint: raw ↔ framed translation,
+  half-close vs disconnect, validation, CLI client, stderr rate limiting
 - `internal/host/shell_test.go` - `docker exec` argument building, stdio/exit code passthrough (fake `docker` on PATH)
 
 **Test harness** (`internal/protocol/testutil/harness.go`):
@@ -270,6 +329,8 @@ E2E scripts in `test/e2e/`:
 - `test-port-forward.sh` - Port forwarding test
 - `test-env-vars.sh` - Environment variable forwarding
 - `test-exec-stdio.sh` - `dworm exec` stdin/stdout passthrough, stdin EOF, exit codes, working directory
+- `test-exec-socket.sh` - Raw socket client (python3), `dworm exec` via the socket, no processes left
+  after killed callers or `up` shutdown (`pgrep` in the container)
 - `test-daemon.sh` - `up --daemon` single instance (exit 3), state file, `status --json`, SIGTERM exit 0, bridge failure exit ≠ 0
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
@@ -301,6 +362,13 @@ curl http://localhost:8080
 3. Add decode function
 4. Handle in `internal/endpoint/server.go` (endpoint receives)
 5. Or handle in `cmd/dworm/main.go` control message loop (host receives)
+
+### Add new host-opened stream type
+
+1. Add a `StreamType…` marker (0x1x range) in `internal/protocol/messages.go`
+2. Write it as the first byte when opening the stream on the host
+3. Dispatch it in `Server.handleStream` (`internal/endpoint/server.go`)
+4. Bump `protocol.ProtocolVersion`
 
 ### Add new CLI flag
 

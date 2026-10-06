@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -484,6 +485,16 @@ func runUp(cmd *cobra.Command, args []string) error {
 		tunnelLogWriter = logWriter
 	}
 	tunnelLogger := log.New(tunnelLogWriter, "[tunnel] ", log.LstdFlags)
+
+	// Local exec socket: runs processes over this bridge (see `dworm exec`).
+	execServer, execErr := host.NewExecServer(lock.Paths.Socket, func() (net.Conn, error) {
+		return endpoint.GetMux().OpenStream()
+	}, containerInfo.WorkspaceDir, log.New(tunnelLogWriter, "", log.LstdFlags))
+	if execErr != nil {
+		logger.Printf("Warning: exec socket disabled: %v", execErr)
+	} else {
+		updateState(func(s *host.InstanceState) { s.ExecSocket = execServer.Path() })
+	}
 	tunnels := host.NewTunnelManager(endpoint, bindAddr, tunnelLogger)
 	portUpdateCh := make(chan []host.PortMapping, 10)
 	tunnels.SetPortUpdateChannel(portUpdateCh)
@@ -579,6 +590,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	cancel()
+	if execServer != nil {
+		execServer.Close()
+	}
 	tunnels.Close()
 	if agentHandler != nil {
 		agentHandler.Close()
@@ -633,6 +647,22 @@ func runExec(cmd *cobra.Command, args []string) error {
 	workspacePath, err := getWorkspacePath()
 	if err != nil {
 		return err
+	}
+
+	// Without a TTY, run over a running `dworm up`: its endpoint terminates the
+	// process group when this client goes away. TTY sessions need docker -t.
+	if !host.StdioIsTerminal() {
+		if state, _ := host.RunningInstance(workspacePath); state != nil && state.ExecSocket != "" {
+			err := host.ExecViaSocket(state.ExecSocket, protocol.ExecRequest{
+				Argv: args,
+				Cwd:  execDir,
+				Env:  parseEnvVars(),
+			}, os.Stdin, os.Stdout, os.Stderr)
+			if !errors.Is(err, host.ErrExecSocketUnavailable) {
+				return err
+			}
+			logger.Printf("Warning: %v; falling back to docker exec", err)
+		}
 	}
 
 	containerID, err := host.GetContainerID(workspacePath)
@@ -743,6 +773,9 @@ func printStatus(w io.Writer, status *host.Status) {
 		connection = "endpoint connected"
 	}
 	fmt.Fprintf(w, "dworm up:   running (pid %d%s), %s\n", up.PID, since, connection)
+	if up.ExecSocket != "" {
+		fmt.Fprintf(w, "  Exec socket:      %s\n", up.ExecSocket)
+	}
 	if len(up.Ports) == 0 {
 		fmt.Fprintf(w, "  Forwarded ports:  none\n")
 	}

@@ -28,6 +28,7 @@ type Server struct {
 	agentForwarder   *AgentForwarder
 	gpgForwarder     *GPGForwarder
 	gitCredForwarder *GitCredForwarder
+	execs            *execManager
 	setupTimeout     time.Duration
 	sendControl      func(string, interface{}) error
 	scanPorts        func() ([]protocol.PortInfo, error)
@@ -35,9 +36,11 @@ type Server struct {
 
 // NewServer creates a new endpoint server
 func NewServer() *Server {
+	logger := log.New(os.Stderr, "[endpoint] ", log.LstdFlags)
 	return &Server{
-		logger:        log.New(os.Stderr, "[endpoint] ", log.LstdFlags),
+		logger:        logger,
 		portAddresses: make(map[int]string),
+		execs:         newExecManager(logger),
 		setupTimeout:  protocol.TunnelSetupTimeout,
 	}
 }
@@ -67,8 +70,8 @@ func (s *Server) Run() error {
 	// Start port scanner
 	go s.runPortScanner()
 
-	// Start accepting tunnel streams
-	go s.acceptTunnelStreams()
+	// Start accepting host-opened streams (tunnels, execs)
+	go s.acceptStreams()
 
 	// Handle control messages
 	return s.handleControlMessages()
@@ -88,6 +91,11 @@ func (s *Server) waitForInit() error {
 	if err != nil {
 		return err
 	}
+	if initMsg.ProtocolVersion != protocol.ProtocolVersion {
+		err := fmt.Errorf("protocol version mismatch: host speaks %d, endpoint speaks %d", initMsg.ProtocolVersion, protocol.ProtocolVersion)
+		s.mux.SendControl(protocol.TypeInitError, &protocol.InitErrorMessage{Error: err.Error()})
+		return err
+	}
 
 	s.baseEnv = inheritedEnvironment()
 	s.envVars = initMsg.EnvVars
@@ -100,7 +108,7 @@ func (s *Server) waitForInit() error {
 	if err := PublishEnvironment(s.envVars); err != nil {
 		return err
 	}
-	if err := s.mux.SendControl(protocol.TypeEnvironmentReady, nil); err != nil {
+	if err := s.mux.SendControl(protocol.TypeEnvironmentReady, &protocol.EnvironmentReadyMessage{ProtocolVersion: protocol.ProtocolVersion}); err != nil {
 		return err
 	}
 
@@ -281,7 +289,7 @@ func preferAddress(a, b string) string {
 	return b
 }
 
-func (s *Server) acceptTunnelStreams() {
+func (s *Server) acceptStreams() {
 	for {
 		stream, err := s.mux.AcceptStream()
 		if err != nil {
@@ -292,7 +300,31 @@ func (s *Server) acceptTunnelStreams() {
 			continue
 		}
 
-		go s.handleTunnelStream(stream)
+		go s.handleStream(stream)
+	}
+}
+
+// handleStream dispatches a host-opened stream on its type marker.
+func (s *Server) handleStream(stream net.Conn) {
+	setupTimeout := s.setupTimeout
+	if setupTimeout == 0 {
+		setupTimeout = protocol.TunnelSetupTimeout
+	}
+	stream.SetDeadline(time.Now().Add(setupTimeout))
+	marker := make([]byte, 1)
+	if _, err := io.ReadFull(stream, marker); err != nil {
+		s.logger.Printf("Failed to read stream type: %v", err)
+		stream.Close()
+		return
+	}
+	switch marker[0] {
+	case protocol.StreamTypeTunnel:
+		s.handleTunnelStream(stream)
+	case protocol.StreamTypeExec:
+		s.execs.handle(stream)
+	default:
+		s.logger.Printf("Unknown stream type: %d", marker[0])
+		stream.Close()
 	}
 }
 
@@ -412,6 +444,8 @@ func (s *Server) handleControlMessages() error {
 }
 
 func (s *Server) cleanup() {
+	// Execs must not outlive the bridge: their callers are gone.
+	s.execs.closeAll()
 	if s.agentForwarder != nil {
 		s.agentForwarder.Close()
 	}

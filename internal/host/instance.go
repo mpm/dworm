@@ -147,6 +147,7 @@ type InstanceState struct {
 	StartedAt         time.Time   `json:"started_at"`
 	EndpointConnected bool        `json:"endpoint_connected"`
 	Ports             []StatePort `json:"ports"`
+	ExecSocket        string      `json:"exec_socket,omitempty"`
 }
 
 // StateFile serializes updates to an instance's state file.

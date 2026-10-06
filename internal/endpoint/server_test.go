@@ -5,10 +5,12 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/mpm/dworm/internal/protocol"
+	"github.com/mpm/dworm/internal/protocol/testutil"
 )
 
 func TestConcurrentPortUpdatesAndTunnelConnections(t *testing.T) {
@@ -145,5 +147,29 @@ func TestPortScanFailurePreservesCurrentSnapshot(t *testing.T) {
 	}
 	if got := server.currentPortSnapshot(); len(got) != 1 || got[0] != wantPorts[0] {
 		t.Fatalf("snapshot changed after scan failure: %v", got)
+	}
+}
+
+func TestInitRejectsProtocolVersionMismatch(t *testing.T) {
+	h, err := testutil.NewTestHarness()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	server := NewServer()
+	server.logger = log.New(io.Discard, "", 0)
+	server.mux = h.EndpointMux
+	done := make(chan error, 1)
+	go func() { done <- server.waitForInit() }()
+
+	if err := h.HostMux.SendControl(protocol.TypeInit, &protocol.InitMessage{ProtocolVersion: protocol.ProtocolVersion - 1}); err != nil {
+		t.Fatal(err)
+	}
+	kind, data, err := h.HostMux.RecvControl()
+	if err != nil || kind != protocol.TypeInitError || !strings.Contains(string(data), "protocol version mismatch") {
+		t.Fatalf("reply = %s %s, %v; want init_error", kind, data, err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("waitForInit accepted a mismatched protocol version")
 	}
 }

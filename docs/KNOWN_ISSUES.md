@@ -18,16 +18,25 @@ This document tracks known limitations and potential issues with existing functi
 
 ### `docker exec` fallback can leave processes behind
 
-**Issue**: When no `dworm up` is running for the workspace, `dworm exec` runs the
-command through `docker exec -i`. Killing the `docker exec` client does not signal
-or kill the process inside the container. `dworm exec` forwards SIGINT/SIGTERM to
-the docker CLI, but if dworm itself is killed (e.g. SIGKILL), the only remaining
-cleanup path is stdin EOF, which only works for processes that exit on EOF.
+**Issue**: When no `dworm up` is running for the workspace, or when stdin and
+stdout are a terminal, `dworm exec` runs the command through `docker exec`.
+Killing the `docker exec` client does not signal or kill the process inside the
+container. `dworm exec` forwards SIGINT/SIGTERM to the docker CLI, but if dworm
+itself is killed (e.g. SIGKILL), the only remaining cleanup path is stdin EOF,
+which only works for processes that exit on EOF.
 
-**Current behavior**: Processes that ignore stdin EOF can survive their caller.
+**Current behavior**: Processes that ignore stdin EOF can survive their caller
+on the `docker exec` path. With a running `dworm up`, non-TTY `dworm exec` and
+exec-socket clients run over the bridge instead, and the endpoint terminates the
+process group when the caller disconnects.
 
-**Potential fix**: Run commands over the running `dworm up` bridge so the endpoint
-owns the process group and can terminate it when the caller disconnects.
+### Raw exec clients: disconnect detection is Linux-only
+
+**Issue**: In raw mode, a client half-close means stdin EOF, so dworm must tell a
+half-close from a full disconnect. It uses `POLLHUP` on the unix socket, which
+Linux reports only after a full close. On other host platforms a raw client that
+disconnects after half-closing is noticed only when writing output fails or the
+process exits. Framed mode is unaffected.
 
 ## GPG Agent Forwarding
 

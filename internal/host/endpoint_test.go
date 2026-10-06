@@ -1,10 +1,13 @@
 package host
 
 import (
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/mpm/dworm/internal/protocol"
 	"github.com/mpm/dworm/internal/protocol/testutil"
 )
 
@@ -21,7 +24,7 @@ func TestOpenTunnelStreamTimesOutWithoutResponse(t *testing.T) {
 		stream, err := h.EndpointMux.AcceptStream()
 		if err == nil {
 			defer stream.Close()
-			portHeader := make([]byte, 4)
+			portHeader := make([]byte, 5) // marker + port
 			_, _ = io.ReadFull(stream, portHeader)
 			close(accepted)
 			_, _ = io.Copy(io.Discard, stream)
@@ -53,7 +56,7 @@ func TestOpenTunnelStreamClearsSetupDeadline(t *testing.T) {
 			return
 		}
 		defer stream.Close()
-		portHeader := make([]byte, 4)
+		portHeader := make([]byte, 5) // marker + port
 		if _, err := io.ReadFull(stream, portHeader); err != nil {
 			return
 		}
@@ -72,5 +75,48 @@ func TestOpenTunnelStreamClearsSetupDeadline(t *testing.T) {
 	response := make([]byte, len("response"))
 	if _, err := io.ReadFull(stream, response); err != nil {
 		t.Fatalf("read after setup deadline: %v", err)
+	}
+}
+
+func TestOpenTunnelStreamSendsTypeMarker(t *testing.T) {
+	h, err := testutil.NewTestHarness()
+	if err != nil {
+		t.Fatalf("create harness: %v", err)
+	}
+	defer h.Close()
+
+	endpoint := &EndpointManager{mux: h.HostMux}
+	header := make(chan []byte, 1)
+	go func() {
+		stream, err := h.EndpointMux.AcceptStream()
+		if err != nil {
+			return
+		}
+		defer stream.Close()
+		buf := make([]byte, 5)
+		io.ReadFull(stream, buf)
+		header <- buf
+		stream.Write([]byte{1})
+	}()
+	stream, err := endpoint.OpenTunnelStream(0x01020304)
+	if err != nil {
+		t.Fatalf("open tunnel: %v", err)
+	}
+	stream.Close()
+	if got := <-header; string(got) != string([]byte{protocol.StreamTypeTunnel, 1, 2, 3, 4}) {
+		t.Fatalf("header = %v", got)
+	}
+}
+
+func TestCheckEnvironmentReady(t *testing.T) {
+	ok := fmt.Sprintf(`{"protocol_version":%d}`, protocol.ProtocolVersion)
+	if err := checkEnvironmentReady(protocol.TypeEnvironmentReady, []byte(ok)); err != nil {
+		t.Fatalf("matching version: %v", err)
+	}
+	if err := checkEnvironmentReady(protocol.TypeEnvironmentReady, nil); err == nil {
+		t.Fatal("acknowledgement without version (older endpoint) accepted")
+	}
+	if err := checkEnvironmentReady(protocol.TypeInitError, []byte(`{"error":"protocol version mismatch"}`)); err == nil || !strings.Contains(err.Error(), "protocol version mismatch") {
+		t.Fatalf("init error = %v", err)
 	}
 }

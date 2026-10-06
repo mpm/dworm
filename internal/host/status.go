@@ -26,14 +26,15 @@ type ContainerStatus struct {
 	WorkspaceFolder string `json:"workspace_folder"`
 }
 
-// UpStatus describes the workspace's `dworm up` process. PID and StartedAt are
-// omitted when no `dworm up` holds the workspace lock.
+// UpStatus describes the workspace's `dworm up` process. PID, StartedAt, and
+// ExecSocket are omitted when no `dworm up` holds the workspace lock.
 type UpStatus struct {
 	Running           bool        `json:"running"`
 	PID               int         `json:"pid,omitempty"`
 	StartedAt         *time.Time  `json:"started_at,omitempty"`
 	EndpointConnected bool        `json:"endpoint_connected"`
 	Ports             []StatePort `json:"ports"`
+	ExecSocket        string      `json:"exec_socket,omitempty"`
 }
 
 // RunningInstance returns the state of the `dworm up` holding the workspace
@@ -75,6 +76,7 @@ func GetStatus(workspacePath, dwormVersion string) (*Status, error) {
 			PID:               instance.PID,
 			EndpointConnected: instance.EndpointConnected,
 			Ports:             instance.Ports,
+			ExecSocket:        instance.ExecSocket,
 		}
 		if !instance.StartedAt.IsZero() {
 			status.Up.StartedAt = &instance.StartedAt

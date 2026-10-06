@@ -82,24 +82,35 @@ func jsonEnv(name string, value interface{}) {
 	os.Setenv(name, string(data))
 }
 
-// RunWithEnvironment replaces this process, preserving signals and exit codes.
-func RunWithEnvironment(overrides map[string]string, shell bool, args []string) error {
+// launchLayers returns the environment layers of a launched process: the
+// inherited environment and the published dworm environment. Overrides from
+// the caller go on top of both.
+func launchLayers(overrides map[string]string) (base, env map[string]string, err error) {
 	if err := config.Validate(overrides); err != nil {
-		return err
+		return nil, nil, err
 	}
-	env, err := readEnvironment()
+	env, err = readEnvironment()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if len(args) == 0 {
-		return fmt.Errorf("missing command")
-	}
-	base := inheritedEnvironment()
+	base = inheritedEnvironment()
 	// A nested launcher starts a new independent shell state.
 	for k := range base {
 		if strings.HasPrefix(k, "_DWORM_") {
 			delete(base, k)
 		}
+	}
+	return base, env, nil
+}
+
+// RunWithEnvironment replaces this process, preserving signals and exit codes.
+func RunWithEnvironment(overrides map[string]string, shell bool, args []string) error {
+	base, env, err := launchLayers(overrides)
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("missing command")
 	}
 	if shell {
 		if err := os.MkdirAll(environmentDir, 0700); err != nil {

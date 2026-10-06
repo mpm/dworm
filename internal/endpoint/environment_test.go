@@ -163,7 +163,7 @@ func TestEnvironmentControlUpdates(t *testing.T) {
 			t.Error("endpoint did not stop")
 		}
 	}()
-	if err := h.HostMux.SendControl(protocol.TypeInit, &protocol.InitMessage{EnvVars: map[string]string{"DWORM_TEST_MANAGED": "initial"}}); err != nil {
+	if err := h.HostMux.SendControl(protocol.TypeInit, &protocol.InitMessage{EnvVars: map[string]string{"DWORM_TEST_MANAGED": "initial"}, ProtocolVersion: protocol.ProtocolVersion}); err != nil {
 		t.Fatal(err)
 	}
 	kind, _, err := h.HostMux.RecvControl()

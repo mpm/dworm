@@ -1,6 +1,7 @@
 package host
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -138,6 +139,7 @@ func (e *EndpointManager) SendInit(envVars map[string]string, agentForward bool,
 		GitConfigContent: gitConfigContent,
 		GitCredForward:   gitCredForward,
 		GPGPublicKeys:    gpgPublicKeys,
+		ProtocolVersion:  protocol.ProtocolVersion,
 	})
 }
 
@@ -155,9 +157,9 @@ func (e *EndpointManager) RecvControl() (string, []byte, error) {
 func (e *EndpointManager) WaitEnvironmentReady() error {
 	result := make(chan error, 1)
 	go func() {
-		kind, _, err := e.RecvControl()
-		if err == nil && kind != protocol.TypeEnvironmentReady {
-			err = fmt.Errorf("expected environment acknowledgement, got %s", kind)
+		kind, data, err := e.RecvControl()
+		if err == nil {
+			err = checkEnvironmentReady(kind, data)
 		}
 		result <- err
 	}()
@@ -167,6 +169,28 @@ func (e *EndpointManager) WaitEnvironmentReady() error {
 	case <-time.After(30 * time.Second):
 		e.mux.Close()
 		return fmt.Errorf("timed out waiting for environment initialization")
+	}
+}
+
+func checkEnvironmentReady(kind string, data []byte) error {
+	switch kind {
+	case protocol.TypeEnvironmentReady:
+		var ready protocol.EnvironmentReadyMessage
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &ready); err != nil {
+				return fmt.Errorf("invalid environment acknowledgement: %w", err)
+			}
+		}
+		if ready.ProtocolVersion != protocol.ProtocolVersion {
+			return fmt.Errorf("endpoint protocol version %d does not match host protocol version %d", ready.ProtocolVersion, protocol.ProtocolVersion)
+		}
+		return nil
+	case protocol.TypeInitError:
+		var initErr protocol.InitErrorMessage
+		json.Unmarshal(data, &initErr)
+		return fmt.Errorf("endpoint rejected init: %s", initErr.Error)
+	default:
+		return fmt.Errorf("expected environment acknowledgement, got %s", kind)
 	}
 }
 
@@ -185,8 +209,9 @@ func (e *EndpointManager) OpenTunnelStream(port int) (net.Conn, error) {
 		return nil, fmt.Errorf("failed to set tunnel setup deadline: %w", err)
 	}
 
-	// Send port as 4-byte header
+	// Send stream type and port as 4-byte header
 	portBuf := []byte{
+		protocol.StreamTypeTunnel,
 		byte(port >> 24),
 		byte(port >> 16),
 		byte(port >> 8),

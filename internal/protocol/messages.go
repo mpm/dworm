@@ -13,13 +13,27 @@ const (
 	TypePong             = "pong"
 	TypeEnvironment      = "environment"
 	TypeEnvironmentReady = "environment_ready"
+	TypeInitError        = "init_error"
 )
 
-// Stream type markers (first byte of streams opened by endpoint)
+// ProtocolVersion is bumped on incompatible bridge changes. Host and endpoint
+// come from the same build (the endpoint is embedded and injected on every
+// `dworm up`); the check makes any mismatch fail loudly instead of corrupting
+// streams.
+//
+// Version 2: host-opened streams start with a stream type marker.
+const ProtocolVersion = 2
+
+// Stream type markers (first byte of every yamux stream except the control stream)
 const (
+	// Opened by the endpoint
 	StreamTypeAgent   byte = 0x01 // SSH agent forwarding stream
 	StreamTypeGPG     byte = 0x02 // GPG agent forwarding stream
 	StreamTypeGitCred byte = 0x03 // Git credential forwarding stream
+
+	// Opened by the host
+	StreamTypeTunnel byte = 0x10 // Port tunnel; followed by a 4-byte port header
+	StreamTypeExec   byte = 0x11 // Process execution; see exec.go
 )
 
 // Message is the base envelope for all protocol messages
@@ -38,6 +52,17 @@ type InitMessage struct {
 	GitConfigContent string            `json:"git_config_content,omitempty"` // Content of host's ~/.gitconfig
 	GitCredForward   bool              `json:"git_cred_forward"`             // Whether to enable git credential forwarding
 	GPGPublicKeys    string            `json:"gpg_public_keys,omitempty"`    // Armored GPG public keys to import
+	ProtocolVersion  int               `json:"protocol_version"`             // Must equal the endpoint's ProtocolVersion
+}
+
+// EnvironmentReadyMessage acknowledges init with the endpoint's protocol version.
+type EnvironmentReadyMessage struct {
+	ProtocolVersion int `json:"protocol_version"`
+}
+
+// InitErrorMessage reports why the endpoint rejected init.
+type InitErrorMessage struct {
+	Error string `json:"error"`
 }
 
 // PortInfo represents a listening port with its bind address
