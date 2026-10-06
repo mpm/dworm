@@ -15,8 +15,9 @@ func TestInjectionCleansTemporaryPayload(t *testing.T) {
 			log := filepath.Join(dir, "calls")
 			// The started endpoint only drains stdin until Close; yamux
 			// initialization does not need an endpoint handshake. This isolates
-			// copying and staging. (Exiting immediately races with opening the
-			// control stream.)
+			// copying and staging. (Exiting immediately, or closing stdout as
+			// `exec cat >/dev/null` would, races with opening the control
+			// stream.)
 			script := `#!/bin/sh
 printf '%s\n' "$*" >> "$DOCKER_CALLS"
 case "$1" in
@@ -24,7 +25,7 @@ inspect) echo sha256:selected-image ;;
 image) echo linux/arm64 ;;
 cp) [ "$FAIL_STAGE" != copy ] ;;
 exec)
-  if [ "$2" = -i ]; then exec cat >/dev/null; fi
+  if [ "$2" = -i ]; then cat >/dev/null; exit 0; fi
   if [ "$3" = mv ]; then [ "$FAIL_STAGE" != publish ]; fi
   ;;
 esac
