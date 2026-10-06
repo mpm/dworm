@@ -108,6 +108,7 @@ func (b *fakeBridge) deps() instanceDeps {
 		containerRunning: func(string) bool { return true },
 		forwarding:       func(*log.Logger) forwardingConfig { return forwardingConfig{} },
 		initTimeout:      5 * time.Second,
+		stopGrace:        500 * time.Millisecond,
 	}
 }
 
@@ -511,6 +512,157 @@ func TestInstanceReconnectsAfterBridgeLoss(t *testing.T) {
 	ExecViaSocket(f.paths.Socket, protocol.ExecRequest{Argv: []string{"cat"}}, strings.NewReader("again"), &stdout, io.Discard)
 	if stdout.String() != "again" {
 		t.Fatalf("exec after reconnect: stdout %q", stdout.String())
+	}
+}
+
+func TestInstanceReportsReconnectingOnceExecIsRefused(t *testing.T) {
+	var running atomic.Bool
+	running.Store(true)
+	f := startInstance(t, func(d *instanceDeps) {
+		d.containerRunning = func(string) bool { return running.Load() }
+		d.retryMin, d.retryMax, d.reconnectWindow = 20*time.Millisecond, 50*time.Millisecond, time.Minute
+		// Longer than the test: the state must not wait for the stop grace.
+		d.stopGrace = time.Minute
+	})
+	waitState(t, f.paths.Socket, StateReady)
+	events, err := SubscribeEvents(f.paths.Socket, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+
+	running.Store(false) // the container restarts
+	f.bridge.breakBridge()
+	waitFor(t, "exec refused as not ready", func() bool {
+		return rawRequest(t, f.paths.Socket, `{"version":1,"argv":["true"]}`).Code == ReplyCodeNotReady
+	})
+	// From the first refused exec on, op status no longer reports ready.
+	state, err := QueryInstance(f.paths.Socket)
+	if err != nil || state.State != StateReconnecting || state.Reason != ReasonBridgeLost || state.EndpointConnected {
+		t.Fatalf("status once exec is refused = %+v, %v; want reconnecting (bridge_lost)", state, err)
+	}
+	status, err := GetStatus(f.inst.opts.WorkspacePath, "vtest")
+	if err != nil || status.Up.State != StateReconnecting {
+		t.Fatalf("GetStatus up = %+v, %v; want reconnecting", status.Up, err)
+	}
+	// The state file and the event stream follow without the stop grace.
+	waitFor(t, "state file reconnecting", func() bool {
+		s, err := ReadInstanceState(f.paths.State)
+		return err == nil && s.State == StateReconnecting && s.Reconnects == 1
+	})
+	var states []string
+	for len(states) < 2 { // snapshot, reconnecting
+		e, err := events.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.Type == EventState {
+			states = append(states, e.State+":"+e.Reason)
+		}
+	}
+	if states[1] != "reconnecting:bridge_lost" {
+		t.Fatalf("state events = %v", states)
+	}
+}
+
+// ensureOpts returns Ensure options for the fixture's running instance.
+func (f *instanceFixture) ensureOpts(timeout time.Duration) EnsureOptions {
+	return EnsureOptions{WorkspacePath: f.inst.opts.WorkspacePath, Version: "vtest", Timeout: timeout}
+}
+
+func (f *fakeBridge) execRequests() int {
+	f.exec.mu.Lock()
+	defer f.exec.mu.Unlock()
+	return len(f.exec.requests)
+}
+
+func TestEnsureAndRunWaitsForReconnect(t *testing.T) {
+	var running atomic.Bool
+	running.Store(true)
+	f := startInstance(t, func(d *instanceDeps) {
+		d.containerRunning = func(string) bool { return running.Load() }
+		d.retryMin, d.retryMax, d.reconnectWindow = 20*time.Millisecond, 50*time.Millisecond, time.Minute
+	})
+	waitState(t, f.paths.Socket, StateReady)
+	running.Store(false) // the container restarts
+	f.bridge.breakBridge()
+	waitState(t, f.paths.Socket, StateReconnecting)
+
+	var stdout syncBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- EnsureAndRun(context.Background(), f.ensureOpts(10*time.Second), func(state *InstanceState) error {
+			return ExecViaSocket(state.ExecSocket, protocol.ExecRequest{Argv: []string{"cat"}}, strings.NewReader("after restart"), &stdout, io.Discard)
+		})
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("EnsureAndRun returned during the reconnect: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if f.bridge.execRequests() != 0 {
+		t.Fatal("exec reached the endpoint during the reconnect")
+	}
+
+	running.Store(true)
+	select {
+	case err := <-done:
+		var exitErr *ExitError
+		if !errors.As(err, &exitErr) || exitErr.Code != 3 || stdout.String() != "after restart" {
+			t.Fatalf("EnsureAndRun = %v, stdout %q; want the command's exit 3", err, stdout.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("EnsureAndRun did not run the command after the reconnect")
+	}
+	if n := f.bridge.execRequests(); n != 1 {
+		t.Fatalf("endpoint got %d exec requests, want 1", n)
+	}
+}
+
+func TestEnsureAndRunGivesUpAfterTimeout(t *testing.T) {
+	f := startInstance(t, func(d *instanceDeps) {
+		d.containerRunning = func(string) bool { return false }
+		d.retryMin, d.retryMax, d.reconnectWindow = 20*time.Millisecond, 50*time.Millisecond, time.Minute
+	})
+	waitState(t, f.paths.Socket, StateReady)
+	f.bridge.breakBridge()
+	waitState(t, f.paths.Socket, StateReconnecting)
+
+	start := time.Now()
+	var attempts atomic.Int32
+	err := EnsureAndRun(context.Background(), f.ensureOpts(500*time.Millisecond), func(state *InstanceState) error {
+		attempts.Add(1)
+		return ExecViaSocket(state.ExecSocket, protocol.ExecRequest{Argv: []string{"true"}}, strings.NewReader(""), io.Discard, io.Discard)
+	})
+	var exitErr *ExitError
+	if err == nil || errors.As(err, &exitErr) || !strings.Contains(err.Error(), "timed out after 500ms") {
+		t.Fatalf("EnsureAndRun = %v, want a timeout (not an exit status)", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("gave up after %v", elapsed)
+	}
+	if f.bridge.execRequests() != 0 || attempts.Load() != 0 {
+		t.Fatalf("command attempts %d, endpoint requests %d; want none while reconnecting", attempts.Load(), f.bridge.execRequests())
+	}
+}
+
+func TestEnsureAndRunDoesNotRetryStartedCommands(t *testing.T) {
+	f := startInstance(t, nil)
+	waitState(t, f.paths.Socket, StateReady)
+	f.bridge.exec.setIgnoreEOF(true)
+	var attempts atomic.Int32
+	err := EnsureAndRun(context.Background(), f.ensureOpts(10*time.Second), func(state *InstanceState) error {
+		if attempts.Add(1) == 1 {
+			go func() {
+				waitFor(t, "exec running", func() bool { return f.bridge.execRequests() == 1 })
+				f.bridge.breakBridge()
+			}()
+		}
+		return ExecViaSocket(state.ExecSocket, protocol.ExecRequest{Argv: []string{"sleep"}}, strings.NewReader(""), io.Discard, io.Discard)
+	})
+	var exitErr *ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != ExitLost || attempts.Load() != 1 {
+		t.Fatalf("EnsureAndRun = %v after %d attempts; want exit %d once", err, attempts.Load(), ExitLost)
 	}
 }
 

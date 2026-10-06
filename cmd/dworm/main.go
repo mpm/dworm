@@ -49,6 +49,14 @@ var (
 // instance already holds the workspace lock.
 const exitAlreadyRunning = 3
 
+// exitExecFailed is the exit code of `dworm exec` when dworm itself failed and
+// the command was not run (usage errors, the instance could not be started or
+// did not become ready within --timeout, the request was rejected). Like
+// docker, env, and timeout, 125 keeps dworm's failures apart from the
+// command's own exit statuses (126/127: the command could not be started,
+// 255: the command was started but dworm lost it).
+const exitExecFailed = 125
+
 // stopTimeout bounds how long stopping an instance may take.
 const stopTimeout = 30 * time.Second
 
@@ -227,18 +235,11 @@ unless --volumes is given.`,
 	err := rootCmd.Execute()
 	exitCode := 0
 	if err != nil {
-		exitCode = 1
 		var exitErr *host.ExitError
-		var codeErr *exitCodeError
-		if errors.As(err, &exitErr) {
-			// The command's own exit status; it already reported any error.
-			exitCode = exitErr.Code
-		} else {
-			if errors.As(err, &codeErr) {
-				exitCode = codeErr.code
-			}
+		if !errors.As(err, &exitErr) {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
+		exitCode = exitCodeFor(err, selected == execCmd)
 	}
 
 	// Check for update result (non-blocking)
@@ -253,6 +254,23 @@ unless --volumes is given.`,
 	}
 
 	os.Exit(exitCode)
+}
+
+// exitCodeFor returns dworm's exit code for a failed command. exec reports
+// its own failures (not the command's) with exitExecFailed.
+func exitCodeFor(err error, exec bool) int {
+	var exitErr *host.ExitError
+	var codeErr *exitCodeError
+	switch {
+	case errors.As(err, &exitErr):
+		// The command's own exit status; it already reported any error.
+		return exitErr.Code
+	case errors.As(err, &codeErr):
+		return codeErr.code
+	case exec:
+		return exitExecFailed
+	}
+	return 1
 }
 
 func runOperationalCommand(runE func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
@@ -354,13 +372,24 @@ func runInstance(cmd *cobra.Command, mode string) error {
 // ensureInstance makes sure the workspace instance runs and is ready. With
 // applyEnv, -e values are passed to an instance this call starts.
 func ensureInstance(cmd *cobra.Command, applyEnv bool) (*host.InstanceState, error) {
-	workspacePath, err := getWorkspacePath()
+	opts, err := ensureOptions(cmd, applyEnv)
 	if err != nil {
 		return nil, err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return host.Ensure(ctx, opts)
+}
+
+// ensureOptions builds the Ensure options from the command line.
+func ensureOptions(cmd *cobra.Command, applyEnv bool) (host.EnsureOptions, error) {
+	workspacePath, err := getWorkspacePath()
+	if err != nil {
+		return host.EnsureOptions{}, err
+	}
 	var args []string
 	if cfgPath, err := getConfigPath(); err != nil {
-		return nil, err
+		return host.EnsureOptions{}, err
 	} else if cfgPath != "" {
 		args = append(args, "-c", cfgPath)
 	}
@@ -368,7 +397,7 @@ func ensureInstance(cmd *cobra.Command, applyEnv bool) (*host.InstanceState, err
 	if applyEnv {
 		env = parseEnvVars()
 		if err := config.Validate(env); err != nil {
-			return nil, err
+			return host.EnsureOptions{}, err
 		}
 		for _, e := range envVars {
 			args = append(args, "-e", e)
@@ -381,9 +410,7 @@ func ensureInstance(cmd *cobra.Command, applyEnv bool) (*host.InstanceState, err
 	if verbose || term.IsTerminal(int(os.Stderr.Fd())) {
 		progress = crStderr
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	return host.Ensure(ctx, host.EnsureOptions{
+	return host.EnsureOptions{
 		WorkspacePath: workspacePath,
 		SpawnArgs:     args,
 		Env:           env,
@@ -392,7 +419,7 @@ func ensureInstance(cmd *cobra.Command, applyEnv bool) (*host.InstanceState, err
 		Progress:      progress,
 		Warnings:      crStderr,
 		Version:       version.Version,
-	})
+	}, nil
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
@@ -502,17 +529,23 @@ func runExec(cmd *cobra.Command, args []string) error {
 	if noBridge {
 		return runExecNoBridge(args)
 	}
-	state, err := ensureInstance(cmd, false)
+	opts, err := ensureOptions(cmd, false)
 	if err != nil {
 		return err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	// The instance's endpoint terminates the process (group or TTY session)
-	// when this client goes away.
+	// when this client goes away. A request rejected as not ready (e.g. while
+	// the instance reconnects after a container restart) never started the
+	// command; EnsureAndRun waits for the instance and sends it again.
 	req := protocol.ExecRequest{Argv: args, Cwd: execDir, Env: parseEnvVars()}
-	if host.StdioIsTerminal() {
-		return host.ExecTTY(state.ExecSocket, req)
-	}
-	return host.ExecViaSocket(state.ExecSocket, req, os.Stdin, os.Stdout, os.Stderr)
+	return host.EnsureAndRun(ctx, opts, func(state *host.InstanceState) error {
+		if host.StdioIsTerminal() {
+			return host.ExecTTY(state.ExecSocket, req)
+		}
+		return host.ExecViaSocket(state.ExecSocket, req, os.Stdin, os.Stdout, os.Stderr)
+	})
 }
 
 // runExecNoBridge runs the command through plain `docker exec`.

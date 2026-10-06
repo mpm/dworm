@@ -427,3 +427,20 @@ func TestExecLogWriterRateLimits(t *testing.T) {
 		t.Fatalf("logs = %s", got)
 	}
 }
+
+func TestExecBridgeFailingBeforeOpenIsNotReady(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "exec.sock")
+	server, err := NewExecServer(path, ExecServerConfig{
+		Open:   func() (net.Conn, error) { return nil, errBridgeNotReady },
+		Ready:  func() bool { return true }, // the bridge fails right after the check
+		Logger: log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	err = ExecViaSocket(path, protocol.ExecRequest{Argv: []string{"true"}}, strings.NewReader(""), io.Discard, io.Discard)
+	if !IsNotReady(err) {
+		t.Fatalf("err = %v, want a not_ready rejection", err)
+	}
+}

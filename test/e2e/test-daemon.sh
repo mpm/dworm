@@ -1,6 +1,7 @@
 #!/bin/bash
 # Test dworm up --foreground lifecycle: single instance, state file, status --json,
-# SIGTERM exit code, reconnect after docker restart, plain log line endings
+# SIGTERM exit code, reconnect after docker restart (exec right after it waits),
+# plain log line endings
 
 set -e
 
@@ -113,6 +114,15 @@ fi
 log_info "Checking that the instance reconnects after docker restart..."
 start_daemon "$LOG_DIR/third.log"
 docker restart "$CONTAINER_ID" >/dev/null
+# Right after the restart the instance is still reconnecting: exec waits for it
+# instead of failing with "not ready".
+status=0
+out=$(cd "$DEVCONTAINER_PATH" && "$DWORM" exec -- echo after-restart </dev/null 2>"$LOG_DIR/exec-restart.log") || status=$?
+if [[ "$status" -ne 0 || "$out" != "after-restart" ]]; then
+    log_fail "dworm exec right after docker restart exited $status with '$out', want 0 and 'after-restart'"
+    cat "$LOG_DIR/exec-restart.log"
+    exit 1
+fi
 for ((i = 0; i < 60; i++)); do
     if [[ "$(status_field up.reconnects)" == "1" && "$(status_field up.state)" == '"ready"' ]]; then
         break

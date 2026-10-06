@@ -32,6 +32,9 @@ const (
 	ReasonContainerStopped = "container_stopped"
 )
 
+// ReasonBridgeLost is the reason of the "reconnecting" state.
+const ReasonBridgeLost = "bridge_lost"
+
 // InstanceOptions configure RunInstance.
 type InstanceOptions struct {
 	WorkspacePath string
@@ -64,6 +67,8 @@ type instanceDeps struct {
 	// trying before the instance stops.
 	retryMin, retryMax time.Duration
 	reconnectWindow    time.Duration
+	// How long a bridge failure waits for a coinciding stop signal.
+	stopGrace time.Duration
 }
 
 func defaultInstanceDeps() instanceDeps {
@@ -85,6 +90,7 @@ func defaultInstanceDeps() instanceDeps {
 		retryMin:         time.Second,
 		retryMax:         30 * time.Second,
 		reconnectWindow:  2 * time.Minute,
+		stopGrace:        500 * time.Millisecond,
 	}
 }
 
@@ -208,7 +214,7 @@ func (i *Instance) run(parent context.Context) error {
 		WorkspaceFolder: func() string { return i.state.Snapshot().WorkspaceFolder },
 		Logger:          i.logger,
 		Ready:           i.ready,
-		Status:          i.state.Snapshot,
+		Status:          i.status,
 		Events:          i.bus,
 		Stop:            func() { i.requestStop(ReasonStopRequested) },
 	})
@@ -304,18 +310,20 @@ func (i *Instance) serve(ctx context.Context) error {
 			return nil
 		case <-session.done:
 		}
-		// systemd signals the whole cgroup, so the docker exec carrying the
-		// bridge may die just before our own SIGTERM is delivered. A stop that
-		// arrives with the failure is still a clean shutdown.
-		if stopRequested(ctx, 500*time.Millisecond) {
-			return nil
-		}
+		// Exec requests are refused from now on, so the state says so at
+		// once (also before the stop grace below).
 		i.logger.Printf("Bridge lost: %v", session.err)
 		if old := i.setBridge(nil); old != nil {
 			old.close()
 		}
 		i.update(func(s *InstanceState) { s.Reconnects++ })
-		i.setState(StateReconnecting, "bridge_lost")
+		i.setState(StateReconnecting, ReasonBridgeLost)
+		// systemd signals the whole cgroup, so the docker exec carrying the
+		// bridge may die just before our own SIGTERM is delivered. A stop that
+		// arrives with the failure is still a clean shutdown.
+		if stopRequested(ctx, i.deps.stopGrace) {
+			return nil
+		}
 
 		session, err = i.reconnect(ctx, info.ContainerID)
 		if ctx.Err() != nil {
@@ -565,16 +573,37 @@ func (i *Instance) ready() bool {
 	return i.readyBridge() != nil
 }
 
-// readyBridge returns the bridge while the instance is ready.
-func (i *Instance) readyBridge() *bridgeSession {
+// liveBridge returns the current bridge unless its mux has failed.
+func (i *Instance) liveBridge() *bridgeSession {
 	b := i.currentBridge()
-	// A failed mux is not ready even before the reconnect starts.
-	if b == nil || b.mux.IsClosed() || i.state.Snapshot().State != StateReady {
+	// A failed mux is not usable even before the serve loop notices.
+	if b == nil || b.mux.IsClosed() {
 		return nil
 	}
 	return b
 }
 
+// readyBridge returns the bridge while the instance is ready.
+func (i *Instance) readyBridge() *bridgeSession {
+	if i.state.Snapshot().State != StateReady {
+		return nil
+	}
+	return i.liveBridge()
+}
+
+// status is the live state for op status. It reports "ready" exactly when
+// exec requests are served: a bridge that just failed already counts as
+// reconnecting, before the serve loop has noticed.
+func (i *Instance) status() InstanceState {
+	s := i.state.Snapshot()
+	if s.State == StateReady && i.liveBridge() == nil {
+		s.State, s.Reason, s.EndpointConnected = StateReconnecting, ReasonBridgeLost, false
+	}
+	return s
+}
+
+// errBridgeNotReady is answered with ReplyCodeNotReady: the command was not
+// started.
 var errBridgeNotReady = errors.New("bridge is not ready")
 
 func (i *Instance) openStream() (net.Conn, error) {
@@ -582,7 +611,12 @@ func (i *Instance) openStream() (net.Conn, error) {
 	if b == nil {
 		return nil, errBridgeNotReady
 	}
-	return b.mux.OpenStream()
+	stream, err := b.mux.OpenStream()
+	if err != nil && b.mux.IsClosed() {
+		// The bridge failed between the readiness check and the open.
+		return nil, errBridgeNotReady
+	}
+	return stream, err
 }
 
 // OpenTunnelStream implements tunnelOpener: new tunnel connections are

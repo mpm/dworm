@@ -55,15 +55,65 @@ type ensurer struct {
 // Ensure makes sure the workspace's instance runs and is ready, starting a
 // detached one if needed, and returns its live state.
 func Ensure(ctx context.Context, opts EnsureOptions) (*InstanceState, error) {
+	e := newEnsurer(opts)
+	ctx, cancel := context.WithTimeout(ctx, e.opts.Timeout)
+	defer cancel()
+	return e.ensure(ctx)
+}
+
+// notReadyRetryDelay spaces out attempts of EnsureAndRun.
+const notReadyRetryDelay = 100 * time.Millisecond
+
+// EnsureAndRun ensures the instance like Ensure and calls run with its live
+// state. If run's command was rejected as not ready (ReplyCodeNotReady: the
+// instance lost its bridge, e.g. on a container restart, since it reported
+// ready), the command was never started: EnsureAndRun waits for the instance
+// to be ready again (or starts it anew if it stopped meanwhile) and calls run
+// again. opts.Timeout bounds all waiting together; run itself is not bounded.
+// Errors of the waiting are returned as they are, run's errors unchanged.
+func EnsureAndRun(ctx context.Context, opts EnsureOptions, run func(*InstanceState) error) error {
+	e := newEnsurer(opts)
+	ctx, cancel := context.WithTimeout(ctx, e.opts.Timeout)
+	defer cancel()
+	for {
+		state, err := e.ensure(ctx)
+		if err != nil {
+			return err
+		}
+		err = run(state)
+		if !IsNotReady(err) {
+			return err
+		}
+		if e.opts.Progress != nil {
+			fmt.Fprintln(e.opts.Progress, "dworm instance is not ready; waiting for it")
+		}
+		select {
+		case <-ctx.Done():
+			return e.ctxError(ctx, ctx.Err())
+		case <-time.After(notReadyRetryDelay):
+		}
+	}
+}
+
+// IsNotReady reports whether err is an exec request the instance rejected
+// because it was not ready; the command was not started.
+func IsNotReady(err error) bool {
+	var rejected *ExecRejectedError
+	return errors.As(err, &rejected) && rejected.Code == ReplyCodeNotReady
+}
+
+func newEnsurer(opts EnsureOptions) *ensurer {
 	if opts.Timeout == 0 {
 		opts.Timeout = DefaultEnsureTimeout
 	}
 	if opts.Warnings == nil {
 		opts.Warnings = io.Discard
 	}
-	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
-	e := &ensurer{opts: opts, paths: InstancePathsFor(opts.WorkspacePath)}
+	return &ensurer{opts: opts, paths: InstancePathsFor(opts.WorkspacePath)}
+}
+
+// ensure makes sure the instance is ready; ctx carries the deadline.
+func (e *ensurer) ensure(ctx context.Context) (*InstanceState, error) {
 	for attempt := 0; ; attempt++ {
 		state, err := e.attach(ctx)
 		if err == nil {
@@ -195,7 +245,13 @@ func (e *ensurer) waitReady(ctx context.Context, state *InstanceState) (*Instanc
 		case EventState:
 			switch event.State {
 			case StateReady:
-				return QueryInstance(e.paths.Socket)
+				// The snapshot may lag behind a bridge that just failed;
+				// the reconnecting and ready events follow then.
+				state, err := QueryInstance(e.paths.Socket)
+				if err != nil || state.State == StateReady {
+					return state, err
+				}
+				continue
 			case StateFailed:
 				return nil, e.failure(event.Reason, recent)
 			case StateStopped:

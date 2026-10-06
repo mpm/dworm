@@ -153,6 +153,15 @@ Key flows (see "Instance lifecycle" below):
   `docker exec -i[t]` through the `--with-env` launcher (workspace folder from `host.WorkspaceFolder`).
   Stdin is always attached. stdout carries only the child's stdout (all diagnostics go to stderr). The
   child's exit status becomes dworm's exit status (`host.ExitError`, handled in `main()`).
+  `host.EnsureAndRun` does the ensure and the exec: a `not_ready` reply (`host.IsNotReady`; the command
+  was not started, e.g. the instance is reconnecting after a container restart) makes it ensure again
+  (follow events until `ready`, or start anew after `stopped`) and resend; `--timeout` bounds all the
+  waiting together, the command itself is not bounded. Only `not_ready` is retried.
+  Exit codes besides the child's (`exitCodeFor` in `main.go`): **125** (`exitExecFailed`) = dworm
+  failed and the command was not run (usage errors, ensure failed/timed out, `--no-start`, rejected
+  request; any non-`ExitError` error of `exec`), 126/127 = not executable/not found (endpoint),
+  **255** (`host.ExitLost`) = started, then lost (`bridge lost` exit frame, or the socket connection
+  broke before the exit frame; `ExecViaSocket`/`ExecTTY` print `dworm: …` and return `ExitError`).
 - `--no-start` (`shell`, `exec`): fail instead of starting a stopped container. `-v/--verbose` shows
   startup progress also when stderr is not a terminal; `--timeout` (default 15m) bounds the wait.
 - `status [--json]`: `host.GetStatus` (see below). Exits 0 when there is no container or no instance.
@@ -244,7 +253,13 @@ endpoint injection + init, tunnels, agent forwarding, socket). Every command is 
   otherwise). The lock file is never deleted. `InstanceRunning` probes with a momentary
   `LOCK_SH|LOCK_NB`; acquisition retries for ~250ms so a concurrent probe cannot make it fail.
 - **Socket first:** right after the lock, before `devcontainer up`. Until `ready`, exec requests get
-  `{"ok":false,"error":"not ready","code":"not_ready"}`.
+  `{"ok":false,"error":"not ready","code":"not_ready"}` (also when the bridge fails between the
+  readiness check and opening the stream: `errBridgeNotReady`).
+- **Readiness is one thing:** exec is served iff state `ready` and the bridge mux is alive
+  (`readyBridge`). Op `status` (`Instance.status`) reports `reconnecting`/`bridge_lost` as soon as the
+  mux has failed, even before the serve loop notices; the serve loop then sets `reconnecting`
+  (state file, event) at once, before the 500ms stop grace (`stopGrace`). So status never says
+  `ready` while execs are refused.
 - States: `starting` (host env, `devcontainer up`) → `connecting` (endpoint) → `ready` ⇄
   `reconnecting` → `stopping` → `stopped` (reason `stop_requested`, `signal`, `container_stopped`) or
   `failed` (reason = error). Each change is a `state` event and is mirrored in the state file.
@@ -256,7 +271,7 @@ endpoint injection + init, tunnels, agent forwarding, socket). Every command is 
   `container_stopped` (exit 0; a later `ensure` starts everything again). During the reconnect host
   port listeners stay open but refuse new connections, exec requests get `not_ready`, and running execs
   are lost: framed clients get a final exit frame `{"code":255,"error":"bridge lost"}`, raw clients get
-  their connection closed. Nothing is queued. Only unrecoverable errors (e.g. `devcontainer up` failed,
+  their connection closed. Nothing is queued by the instance (`dworm exec` itself waits, see above). Only unrecoverable errors (e.g. `devcontainer up` failed,
   the endpoint cannot be re-injected into a running container) make the instance exit non-zero.
 - **Detached start** (`ensure.go`): `dworm __instance` with the global flags (`-c`, `-e`, `--bind`),
   cwd = workspace, `Setsid`, stdin `/dev/null`, stdout/stderr appended to `<hash>.log`. After taking the
@@ -265,6 +280,7 @@ endpoint injection + init, tunnels, agent forwarding, socket). Every command is 
   spawned child that exits 3 lost the race to another instance, which counts as running. Waits up to
   10s for the socket, then follows op `events` until `state: ready`; fails on `failed` (prints the
   reason and the last log lines); on `stopped` it waits for the lock to be released and starts anew.
+  A `ready` event whose `status` query no longer says `ready` (bridge failed meanwhile) keeps waiting.
   Progress (log events) goes to stderr when it is a TTY or with `-v`. Default timeout 15 min.
 - **Version check:** the state and op `status` carry `dworm_version`; `Ensure` rejects any mismatch
   ("instance runs vX, this is vY; run `dworm stop`"). v0.7.0 instances (no ops) are detected by their
@@ -406,15 +422,17 @@ Test files:
 - `internal/host/instance_test.go` - Instance lock exclusivity/probing, state file
 - `internal/host/instancerun_test.go` - Instance with fake container/endpoint deps: socket before ready
   (`not_ready`), state sequence, stop op, failure, op dispatch and op-less (v0.7.0) requests, reconnect
-  after a simulated bridge break (exit 255 + `bridge lost`, tunnels refused, back to `ready`), stop
-  with `container_stopped`. Its
+  after a simulated bridge break (exit 255 + `bridge lost`, tunnels refused, back to `ready`), status
+  `reconnecting` as soon as exec is refused (also state file/event, without the stop grace),
+  `EnsureAndRun` waiting through a reconnect / giving up at `--timeout` / never resending a started
+  command, stop with `container_stopped`. Its
   `TestMain` turns the test binary into a fake detached instance for `ensure_test.go`
 - `internal/host/ensure_test.go` - Concurrent ensures share one instance, version mismatch, env warning,
   `--no-start`
 - `internal/host/events_test.go` - Event bus snapshot/live/history, slow-subscriber drop marker, JSON shape
 - `internal/endpoint/server_test.go` - also: logs switch to the control channel after init, first port
   report even when empty
-- `cmd/dworm/main_test.go` - usage on errors, `dworm logs` event formatting
+- `cmd/dworm/main_test.go` - usage on errors, `dworm logs` event formatting, exit codes (`exitCodeFor`)
 - `internal/host/status_test.go` - Status JSON shape, metadata/remote user parsing, state-file fallback
   (fake `docker`); `instancerun_test.go` covers the live status of a running instance
 - `internal/protocol/exec_test.go` - Exec frame/message encoding and size limits
@@ -423,7 +441,7 @@ Test files:
   (`stty size`), `TERM`, Ctrl-C bytes, disconnect → SIGHUP first → whole session gone
 - `internal/host/execserver_test.go` - Exec socket against a fake endpoint: raw ↔ framed translation,
   half-close vs disconnect, validation, CLI client, stderr rate limiting, TTY requests and resize
-  frames, bridge-lost exit frames
+  frames, bridge-lost exit frames, a bridge failing at stream open answers `not_ready`
 - `internal/host/shell_test.go` - `docker exec` argument building, stdio/exit code passthrough (fake `docker` on PATH)
 - `internal/host/remove_test.go` - `dworm remove` plan and docker calls with a fake `docker`: Compose project
   (all services, image order/dedup by tag, networks, volumes kept or removed, failures collected) and the
@@ -452,10 +470,11 @@ E2E scripts in `test/e2e/`:
   after killed callers or instance shutdown (`pgrep` in the container)
 - `test-instance.sh` - `up -d` (and a second one returning at once), `dworm shell` on a PTY (python3
   pty driver) leaving the instance running, `logs -f --json` exec events, SIGKILLed TTY `dworm exec`
-  (via `script`) leaves no process, `stop` keeps the container, cold `exec` starts everything, `down`
+  (via `script`) leaves no process, `stop` keeps the container, cold `exec` starts everything, `down`,
+  `exec --no-start` with a stopped container exits 125
 - `test-daemon.sh` - `up --foreground` single instance (exit 3), state file, `status --json` (state, mode,
-  reconnects, clients), SIGTERM exit 0, reconnect after `docker restart` (same PID, `reconnects` 1,
-  state `ready`, exec works)
+  reconnects, clients), SIGTERM exit 0, reconnect after `docker restart` (`dworm exec` right after the
+  restart waits and succeeds; same PID, `reconnects` 1, state `ready`, exec works)
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
 - `test-git-creds.sh` - Git credential forwarding (conditional)

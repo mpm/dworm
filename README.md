@@ -133,7 +133,9 @@ While the container is down it retries for two minutes (enough for
 `docker restart`), then stops. During a reconnect, forwarded ports refuse new
 connections and running processes are lost (`dworm exec` exits with 255 and
 prints `dworm: bridge lost`); the shell's status bar shows `reconnecting...` and
-a new shell starts once the instance is ready again.
+a new shell starts once the instance is ready again. A `dworm exec` started
+during a reconnect waits for it (within `--timeout`) and then runs the command;
+`dworm status` reports `reconnecting` from the moment the bridge is lost.
 
 The instance's files live in `$XDG_RUNTIME_DIR/dworm/` (or `/tmp/dworm-$UID/`,
 mode `0700`), named after a hash of the workspace path: an `flock` lock, a state
@@ -228,7 +230,10 @@ process exits terminates its process group. `framed` mode (used by `dworm exec`)
 carries stdin, stdout, stderr, signals, window sizes, and the exit status as
 frames, and can run the process on a PTY (`"tty":{"rows":24,"cols":80}`); see
 `AGENTS.md`. Up to 32 processes can run concurrently per container. Before the
-instance is ready, exec requests get `{"ok":false,"error":"not ready","code":"not_ready"}`.
+instance is ready (starting, or reconnecting), exec requests get
+`{"ok":false,"error":"not ready","code":"not_ready"}`; the process was not
+started, so wait for a `state` event with `ready` (op `events`) and send the
+request again. Op `status` reports `ready` exactly when exec requests are served.
 
 The event stream starts with a snapshot (current state, ports, recent log lines)
 and continues with live events:
@@ -382,6 +387,22 @@ in-container path of the project directory), unless `dworm exec --workdir/-w`
 selects another directory. `dworm exec` always forwards stdin, uses a PTY only
 when stdin and stdout are both terminals, writes only the command's output to
 stdout, and exits with the command's exit status.
+
+Exit codes of `dworm exec` that do not come from the command itself (as with
+`docker run`):
+
+| Code | Meaning |
+|---|---|
+| 125 | dworm could not run the command, and it was **not started**: invalid usage, the instance could not be started or did not become ready within `--timeout`, `--no-start` with a stopped container, the request was rejected. Safe to retry. |
+| 126, 127 | the command could not be executed (not executable, not found) |
+| 255 | the command was started, but dworm lost it (`bridge lost`, e.g. the container restarted, or the connection to the instance broke); its outcome is unknown |
+
+If the instance is not ready when the request arrives (e.g. it is still
+reconnecting after a container restart), the command has not started; `dworm
+exec` waits for the instance to be ready again (or starts it anew if it stopped
+meanwhile, unless `--no-start`) and sends the request again. `--timeout`
+(default 15m) bounds all of that waiting; a command that was started is never
+sent twice.
 
 ### Example workflow
 

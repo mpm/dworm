@@ -1,7 +1,7 @@
 #!/bin/bash
 # Test the workspace instance: dworm up -d, a shell on a PTY that leaves the
 # instance running, dworm logs, TTY exec cleanup, dworm stop/down, and a cold
-# dworm exec that starts everything
+# dworm exec that starts everything, exit 125 when exec cannot run the command
 
 set -e
 
@@ -162,6 +162,14 @@ PID=$(status_field up.pid)
 dworm down >/dev/null 2>&1
 if ! wait_for 5 eval '! kill -0 "$PID" 2>/dev/null' || [[ "$(status_field up.running)" != "false" || "$(status_field container.running)" != "false" ]]; then
     log_fail "after dworm down: instance or container still running"
+    exit 1
+fi
+
+log_info "dworm exec exits 125 when it cannot run the command..."
+status=0
+dworm exec --no-start -- true </dev/null >/dev/null 2>&1 || status=$?
+if [[ "$status" -ne 125 ]]; then
+    log_fail "dworm exec --no-start with a stopped container exited $status, want 125"
     exit 1
 fi
 

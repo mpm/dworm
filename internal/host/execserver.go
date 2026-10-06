@@ -429,6 +429,10 @@ func (s *ExecServer) handleExec(conn *net.UnixConn, reader *bufio.Reader, req *p
 	req.ID = newExecID()
 
 	stream, err := s.cfg.Open()
+	if errors.Is(err, errBridgeNotReady) {
+		writeReplyLine(conn, protocol.ExecReply{Error: "not ready", Code: ReplyCodeNotReady})
+		return
+	}
 	if err != nil {
 		s.reject(conn, "open bridge stream: %v", err)
 		return

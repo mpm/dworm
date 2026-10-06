@@ -126,6 +126,18 @@ func reportStartError(err error, stderr io.Writer) error {
 	return err
 }
 
+// ExitLost is the exit status of a command that was started but whose end
+// dworm could not observe: the bridge to the container or the connection to
+// the instance was lost.
+const ExitLost = 255
+
+// lostResult reports a connection to the instance that ended before the exit
+// frame. The command was started, so it is not an error to retry.
+func lostResult(err error, stderr io.Writer) error {
+	fmt.Fprintf(stderr, "dworm: lost connection to the dworm instance before the command exited: %v\n", err)
+	return &ExitError{Code: ExitLost}
+}
+
 // exitResult reports an exit frame as the command's exit status.
 func exitResult(exit *protocol.ExecExit, stderr io.Writer) error {
 	if exit.Error != "" {
@@ -180,7 +192,7 @@ func ExecViaSocket(socketPath string, req protocol.ExecRequest, stdin io.Reader,
 	for {
 		frameType, payload, err := session.ReadFrame()
 		if err != nil {
-			return fmt.Errorf("lost connection to the dworm instance before the command exited: %w", err)
+			return lostResult(err, stderr)
 		}
 		switch frameType {
 		case protocol.FrameStdout:
@@ -208,12 +220,8 @@ func ExecTTY(socketPath string, req protocol.ExecRequest) error {
 		termName = "xterm-256color"
 	}
 	req.TTY = &protocol.ExecTTY{Rows: rows, Cols: cols, Term: termName}
-	session, err := StartExec(socketPath, req)
-	if err != nil {
-		return reportStartError(err, os.Stderr)
-	}
-	defer session.Close()
-
+	// Raw mode before the start: a failure here must not leave a started
+	// command behind.
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		return fmt.Errorf("set raw mode: %w", err)
@@ -226,6 +234,12 @@ func ExecTTY(socketPath string, req protocol.ExecRequest) error {
 		}
 	}
 	defer restore()
+	session, err := StartExec(socketPath, req)
+	if err != nil {
+		restore()
+		return reportStartError(err, os.Stderr)
+	}
+	defer session.Close()
 
 	go func() {
 		buf := make([]byte, 32*1024)
@@ -269,7 +283,7 @@ func ExecTTY(socketPath string, req protocol.ExecRequest) error {
 		frameType, payload, err := session.ReadFrame()
 		if err != nil {
 			restore()
-			return fmt.Errorf("lost connection to the dworm instance before the command exited: %w", err)
+			return lostResult(err, os.Stderr)
 		}
 		switch frameType {
 		case protocol.FrameStdout, protocol.FrameStderr:

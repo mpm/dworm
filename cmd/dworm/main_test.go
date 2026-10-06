@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -75,5 +76,30 @@ func TestFormatEvent(t *testing.T) {
 		if got := formatEvent(tt.event); got != "2026-10-07 10:00:00 "+tt.want {
 			t.Errorf("formatEvent = %q, want %q", got, tt.want)
 		}
+	}
+}
+
+func TestExitCodeFor(t *testing.T) {
+	notReady := &host.ExecRejectedError{Message: "not ready", Code: host.ReplyCodeNotReady}
+	for _, tt := range []struct {
+		err  error
+		exec bool
+		want int
+	}{
+		{&host.ExitError{Code: 7}, true, 7},               // the command's own status
+		{&host.ExitError{Code: host.ExitLost}, true, 255}, // started, then lost
+		{fmt.Errorf("wrapped: %w", &host.ExitError{Code: 2}), true, 2},
+		{&exitCodeError{code: exitAlreadyRunning, err: errors.New("running")}, false, 3},
+		{errors.New("timed out after 15m0s waiting for the dworm instance"), true, exitExecFailed},
+		{notReady, true, exitExecFailed},
+		{host.ErrContainerNotRunning, true, exitExecFailed},
+		{errors.New("failed"), false, 1},
+	} {
+		if got := exitCodeFor(tt.err, tt.exec); got != tt.want {
+			t.Errorf("exitCodeFor(%v, exec=%v) = %d, want %d", tt.err, tt.exec, got, tt.want)
+		}
+	}
+	if exitExecFailed != 125 {
+		t.Fatalf("exitExecFailed = %d; it is documented as 125", exitExecFailed)
 	}
 }
