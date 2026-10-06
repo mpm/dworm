@@ -356,11 +356,19 @@ dworm status --json   # machine-readable
 
 # Remove container and its image (prompts for confirmation)
 dworm remove
-dworm remove --force  # skip confirmation
+dworm remove --force    # skip confirmation
+dworm remove --volumes  # Compose: also remove the project's volumes (data!)
 
 # Rebuild the container from scratch
 dworm rebuild
 ```
+
+For a Compose-based devcontainer (`dockerComposeFile`), `dworm remove` removes
+the whole Compose project: the containers of all services (running or stopped),
+the devcontainer's image and the images built for the project, and the project
+network. Images pulled for other services (e.g. `postgres`) are kept, and so are
+volumes unless you pass `--volumes`. The prompt lists what will be removed, and
+the output what was removed.
 
 `dworm exec` runs the command over the instance, so the endpoint owns the
 process: if the caller disappears (even via SIGKILL), its process group gets

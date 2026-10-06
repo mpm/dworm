@@ -180,16 +180,24 @@ event stream (state, ports, log, exec_started, exec_exited, client, dropped).`,
 	rootCmd.AddCommand(statusCmd)
 
 	// Remove command
-	var forceRemove bool
+	var forceRemove, removeVolumes bool
 	removeCmd := &cobra.Command{
 		Use:   "remove",
-		Short: "Stop, remove container and its image",
-		Args:  cobra.NoArgs,
+		Short: "Stop and remove the devcontainer and its image (with Compose: the whole project)",
+		Long: `Stop the instance, then stop and remove the devcontainer and its image.
+
+For a Compose-based devcontainer (dockerComposeFile), remove the whole Compose
+project instead: all its containers (every service, running or stopped), the
+devcontainer's image and the images built for the project, and its networks.
+Pulled images of other services are kept, and so are the project's volumes
+unless --volumes is given.`,
+		Args: cobra.NoArgs,
 		RunE: runOperationalCommand(func(cmd *cobra.Command, args []string) error {
-			return runRemove(cmd, args, forceRemove)
+			return runRemove(cmd, args, forceRemove, removeVolumes)
 		}),
 	}
 	removeCmd.Flags().BoolVarP(&forceRemove, "force", "f", false, "Skip confirmation prompt")
+	removeCmd.Flags().BoolVar(&removeVolumes, "volumes", false, "Also remove the Compose project's volumes (deletes their data)")
 	rootCmd.AddCommand(removeCmd)
 
 	// Rebuild command
@@ -525,14 +533,28 @@ func runExecNoBridge(args []string) error {
 	return host.ExecCommand(containerID, workDir, parseEnvVars(), args)
 }
 
-func runRemove(cmd *cobra.Command, args []string, force bool) error {
+func runRemove(cmd *cobra.Command, args []string, force, volumes bool) error {
 	workspacePath, err := getWorkspacePath()
 	if err != nil {
 		return err
 	}
 
+	plan, err := host.PlanRemove(workspacePath, host.RemoveOptions{Volumes: volumes})
+	if err != nil {
+		return fmt.Errorf("failed to remove devcontainer: %w", err)
+	}
+	compose := plan.ComposeProject != ""
+	if volumes && !compose {
+		logger.Printf("--volumes only applies to Compose-based devcontainers; ignoring it")
+	}
+
 	if !force {
-		fmt.Fprintf(crStdout, "This will remove the devcontainer and its image for %s. Continue? [y/N] ", workspacePath)
+		if compose {
+			fmt.Fprintf(crStdout, "This will remove the Compose project %q of %s:\n%sContinue? [y/N] ",
+				plan.ComposeProject, workspacePath, plan.Describe())
+		} else {
+			fmt.Fprintf(crStdout, "This will remove the devcontainer and its image for %s. Continue? [y/N] ", workspacePath)
+		}
 		var answer string
 		fmt.Scanln(&answer)
 		if answer != "y" && answer != "Y" {
@@ -544,13 +566,23 @@ func runRemove(cmd *cobra.Command, args []string, force bool) error {
 		return err
 	}
 
-	logger.Printf("Removing devcontainer at %s...", workspacePath)
-
-	if err := host.DevcontainerRemove(workspacePath, true); err != nil {
-		return fmt.Errorf("failed to remove devcontainer: %w", err)
+	if !compose {
+		logger.Printf("Removing devcontainer at %s...", workspacePath)
+		if _, err := plan.Execute(); err != nil {
+			return fmt.Errorf("failed to remove devcontainer: %w", err)
+		}
+		logger.Printf("Container and image removed")
+		return nil
 	}
 
-	logger.Printf("Container and image removed")
+	logger.Printf("Removing Compose project %s of %s...", plan.ComposeProject, workspacePath)
+	result, err := plan.Execute()
+	for _, line := range result.Lines() {
+		logger.Print(line)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to remove Compose project %s: %w", plan.ComposeProject, err)
+	}
 	return nil
 }
 

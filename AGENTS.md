@@ -29,7 +29,8 @@ internal/
 │   ├── writer.go           # CRWriter for terminal output, NewLogWriter (CR only on terminals)
 │   └── testutil/harness.go # Test harness for in-process testing
 ├── host/                   # Host-side only
-│   ├── container.go        # Devcontainer lifecycle (up/down/remove/rebuild via devcontainer CLI + docker), workspace folder lookup
+│   ├── container.go        # Devcontainer lifecycle (up/down/rebuild via devcontainer CLI + docker), workspace folder lookup
+│   ├── remove.go           # `dworm remove`: plan (devcontainer, or its whole Compose project by label) and removal
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
 │   ├── instance.go         # Per-workspace flock, runtime dir, state file (instance_unix.go: flock, setsid, dup2)
@@ -156,7 +157,17 @@ Key flows (see "Instance lifecycle" below):
   startup progress also when stderr is not a terminal; `--timeout` (default 15m) bounds the wait.
 - `status [--json]`: `host.GetStatus` (see below). Exits 0 when there is no container or no instance.
 - `logs [-f] [--json] [-n N]`: the instance's events (see "Event stream").
-- `remove [--force]`: DevcontainerRemove (finds container by label, docker stop + rm + rmi; prompts for confirmation unless `--force`)
+- `remove [--force] [--volumes]` (`remove.go`): `PlanRemove` finds the first container labelled
+  `devcontainer.local_folder=<path>` (running or stopped), then prompts with the plan unless `--force`,
+  stops the instance, and runs `Execute`. Without a `com.docker.compose.project` label: docker stop +
+  rm + rmi of the container's image (unchanged). With it (Compose-based devcontainer), the whole
+  project is removed by that label, so missing compose files (the devcontainer CLI's override file
+  lives in /tmp) do not matter: all project containers (every service, running or stopped; `docker
+  stop` then `rm`), the devcontainer's image by all its tags, every image labelled with the project
+  (the Compose-built `<project>-<service>` images; the `-uid` image inherits the label; pulled images
+  have none and are kept), the project networks, and with `--volumes` the project volumes (and
+  `rm -v` for anonymous ones). Each failure is collected and the rest still runs; it logs
+  `Removed containers/images/networks/volumes: …` and `Kept volumes …`
 - `rebuild`: DevcontainerRebuild (calls `devcontainer up --remove-existing-container`; rebuilds and exits, user runs `up` separately)
 
 ### Exec over the bridge (`internal/host/execserver.go`, `internal/endpoint/exec.go`)
@@ -414,6 +425,9 @@ Test files:
   half-close vs disconnect, validation, CLI client, stderr rate limiting, TTY requests and resize
   frames, bridge-lost exit frames
 - `internal/host/shell_test.go` - `docker exec` argument building, stdio/exit code passthrough (fake `docker` on PATH)
+- `internal/host/remove_test.go` - `dworm remove` plan and docker calls with a fake `docker`: Compose project
+  (all services, image order/dedup by tag, networks, volumes kept or removed, failures collected) and the
+  single-container path
 
 **Test harness** (`internal/protocol/testutil/harness.go`):
 - Connects host and endpoint muxes over `io.Pipe()` for in-process testing
@@ -447,6 +461,9 @@ E2E scripts in `test/e2e/`:
 - `test-git-creds.sh` - Git credential forwarding (conditional)
 - `test-rebuild.sh` - Rebuild command
 - `test-remove.sh` - Remove command (container + image cleanup)
+- `test-remove-compose.sh` - Remove of a Compose devcontainer in a temp workspace (app with `-uid`
+  image + sidecar service + named volume): containers, built images, network gone, pulled image kept,
+  volume kept without and removed with `--volumes`
 
 Conditional tests use exit code 77 to skip (autotools convention).
 

@@ -137,61 +137,6 @@ func GetContainerID(workspacePath string) (string, error) {
 	return lines[0], nil
 }
 
-// DevcontainerRemove stops and removes a devcontainer and optionally its image.
-func DevcontainerRemove(workspacePath string, removeImage bool) error {
-	// Find container (running or stopped)
-	cmd := exec.Command("docker", "ps", "-aq", "--filter",
-		fmt.Sprintf("label=devcontainer.local_folder=%s", workspacePath))
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to find container: %w", err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	if len(lines) == 0 || lines[0] == "" {
-		return fmt.Errorf("no container found for %s", workspacePath)
-	}
-	containerID := lines[0]
-
-	// Get image ID before removing the container
-	var imageID string
-	if removeImage {
-		inspectCmd := exec.Command("docker", "inspect", "--format", "{{.Image}}", containerID)
-		var inspectOut bytes.Buffer
-		inspectCmd.Stdout = &inspectOut
-		if err := inspectCmd.Run(); err == nil {
-			imageID = strings.TrimSpace(inspectOut.String())
-		}
-	}
-
-	// Stop if running
-	if IsContainerRunning(containerID) {
-		stopCmd := exec.Command("docker", "stop", containerID)
-		if output, err := stopCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to stop container: %w\noutput: %s", err, string(output))
-		}
-	}
-
-	// Remove container
-	rmCmd := exec.Command("docker", "rm", containerID)
-	if output, err := rmCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to remove container: %w\noutput: %s", err, string(output))
-	}
-
-	// Remove image
-	if removeImage && imageID != "" {
-		rmiCmd := exec.Command("docker", "rmi", imageID)
-		if output, err := rmiCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("container removed but failed to remove image: %w\noutput: %s", err, string(output))
-		}
-	}
-
-	return nil
-}
-
 // DevcontainerRebuild removes the existing container and rebuilds it.
 func DevcontainerRebuild(workspacePath, configPath string) (*ContainerInfo, error) {
 	args := []string{"up", "--remove-existing-container", "--workspace-folder", workspacePath}
