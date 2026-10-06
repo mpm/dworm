@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -237,4 +239,43 @@ func IsContainerRunning(containerID string) bool {
 	}
 
 	return strings.TrimSpace(stdout.String()) == "true"
+}
+
+// containerMount is the subset of `docker inspect` mount data dworm uses.
+type containerMount struct {
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+}
+
+// ResolveWorkspaceFolder returns the in-container path of workspacePath by
+// finding the bind mount that contains it (the devcontainer workspace mount,
+// or a parent directory mounted by compose setups). It returns "" when no
+// mount matches, so docker falls back to the image's working directory.
+func ResolveWorkspaceFolder(containerID, workspacePath string) string {
+	output, err := exec.Command("docker", "inspect", "--type", "container", "--format", "{{json .Mounts}}", containerID).Output()
+	if err != nil {
+		return ""
+	}
+	var mounts []containerMount
+	if err := json.Unmarshal(output, &mounts); err != nil {
+		return ""
+	}
+	return workspaceFolderFromMounts(mounts, workspacePath)
+}
+
+func workspaceFolderFromMounts(mounts []containerMount, workspacePath string) string {
+	best, bestLen := "", -1
+	for _, m := range mounts {
+		if m.Source == "" || m.Destination == "" {
+			continue
+		}
+		rel, err := filepath.Rel(m.Source, workspacePath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+			continue
+		}
+		if len(m.Source) > bestLen {
+			best, bestLen = path.Join(m.Destination, filepath.ToSlash(rel)), len(m.Source)
+		}
+	}
+	return best
 }

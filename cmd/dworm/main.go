@@ -27,6 +27,7 @@ var (
 	daemonMode bool
 	configPath string
 	bindAddr   string
+	execDir    string
 	crStderr   = protocol.NewCRWriter(os.Stderr)
 	crStdout   = protocol.NewCRWriter(os.Stdout)
 	logger     = log.New(crStderr, "", log.LstdFlags)
@@ -87,6 +88,7 @@ environments.`,
 		Args:  cobra.MinimumNArgs(1),
 		RunE:  runOperationalCommand(runExec),
 	}
+	execCmd.Flags().StringVarP(&execDir, "workdir", "w", "", "Working directory inside the container (default: the workspace folder)")
 	rootCmd.AddCommand(execCmd)
 
 	// Status command
@@ -533,7 +535,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get container ID: %w", err)
 	}
 
-	return host.ExecShell(containerID, "", parseEnvVars())
+	return host.ExecShell(containerID, host.ResolveWorkspaceFolder(containerID, workspacePath), parseEnvVars())
 }
 
 func runExec(cmd *cobra.Command, args []string) error {
@@ -547,7 +549,11 @@ func runExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get container ID: %w", err)
 	}
 
-	return host.ExecCommand(containerID, "", parseEnvVars(), args)
+	workDir := execDir
+	if workDir == "" {
+		workDir = host.ResolveWorkspaceFolder(containerID, workspacePath)
+	}
+	return host.ExecCommand(containerID, workDir, parseEnvVars(), args)
 }
 
 func runRemove(cmd *cobra.Command, args []string, force bool) error {

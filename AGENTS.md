@@ -28,7 +28,7 @@ internal/
 │   ├── writer.go           # CRWriter for terminal output
 │   └── testutil/harness.go # Test harness for in-process testing
 ├── host/                   # Host-side only
-│   ├── container.go        # Devcontainer lifecycle (up/down/remove/rebuild via devcontainer CLI + docker)
+│   ├── container.go        # Devcontainer lifecycle (up/down/remove/rebuild via devcontainer CLI + docker), workspace folder lookup
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
 │   ├── shell.go            # `dworm shell`/`dworm exec` via docker exec (stdio passthrough, ExitError)
@@ -101,6 +101,9 @@ CLI flags:
 Key flows:
 - `up`: DevcontainerUp → InjectAndStart → SendInit → handle port updates → ForwardPort
 - `down`: DevcontainerDown (finds container by label, docker stop)
+- `shell` / `exec`: start in the workspace folder from `ResolveWorkspaceFolder` (`container.go`: the bind
+  mount containing the workspace path, mapped into the container; "" = image default). `exec --workdir/-w`
+  overrides it.
 - `exec -- CMD...`: runs `docker exec -i` through the `--with-env` launcher. Stdin is always attached;
   `-t` is added only when stdin and stdout are both terminals. stdout carries only the child's stdout
   (all diagnostics go to stderr). The child's exit status becomes dworm's exit status

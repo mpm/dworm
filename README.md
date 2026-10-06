@@ -193,6 +193,8 @@ dworm shell
 
 # Run a command in a running container and exit
 dworm exec -- npm test
+dworm exec -w /tmp -- ls          # explicit working directory
+printf 'data' | dworm exec -- cat # stdin/stdout are passed through byte for byte
 
 # Check container status
 dworm status
@@ -204,6 +206,12 @@ dworm remove --force  # skip confirmation
 # Rebuild the container from scratch
 dworm rebuild
 ```
+
+`dworm shell` and `dworm exec` start in the container's workspace folder (the
+in-container path of the project directory), unless `dworm exec --workdir/-w`
+selects another directory. `dworm exec` always forwards stdin, allocates a TTY
+only when stdin and stdout are both terminals, writes only the command's output to
+stdout, and exits with the command's exit status.
 
 ### Example workflow
 

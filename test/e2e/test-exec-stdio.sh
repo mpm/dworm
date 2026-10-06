@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test dworm exec stdio passthrough and exit codes
+# Test dworm exec stdio passthrough, exit codes, and working directories
 
 set -e
 
@@ -39,6 +39,18 @@ check_exec() {
     dworm_exec -- sh -c 'exit 7' </dev/null || status=$?
     if [[ "$status" -ne 7 ]]; then
         log_fail "[$label] exit status = $status, want 7"
+        return 1
+    fi
+
+    log_info "[$label] Checking working directories..."
+    out=$(dworm_exec -- pwd </dev/null)
+    if [[ "$out" != "/home/developer/workspace" ]]; then
+        log_fail "[$label] default working directory = $out, want the workspace folder"
+        return 1
+    fi
+    out=$(dworm_exec -w /tmp -- pwd </dev/null)
+    if [[ "$out" != "/tmp" ]]; then
+        log_fail "[$label] --workdir /tmp gave $out"
         return 1
     fi
 
