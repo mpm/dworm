@@ -32,12 +32,18 @@ internal/
 │   ├── container.go        # Devcontainer lifecycle (up/down/remove/rebuild via devcontainer CLI + docker), workspace folder lookup
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
-│   ├── instance.go         # Per-workspace flock, runtime dir, state file (instance_unix.go: flock)
-│   ├── execserver.go       # Local exec unix socket (raw/framed clients → bridge exec streams)
+│   ├── instance.go         # Per-workspace flock, runtime dir, state file (instance_unix.go: flock, setsid, dup2)
+│   ├── instancerun.go      # The instance: lock → socket → host env → devcontainer up → bridge; state machine
+│   ├── forwarding.go       # Host-side SSH/GPG/git forwarding detection, init message
+│   ├── events.go           # Event bus (snapshot + live, bounded queues, drop markers), log lines → events
+│   ├── logfile.go          # Rotating log file of a detached instance
+│   ├── ensure.go           # Client side: ensure the instance runs (spawn `dworm __instance`, wait for ready)
+│   ├── controlclient.go    # Socket client ops: status, events, stop (StopInstance)
+│   ├── execserver.go       # Instance unix socket: op dispatch (exec raw/framed → bridge exec streams, events, status, stop)
 │   ├── execserver_linux.go # SO_PEERCRED check, POLLHUP disconnect detection for raw mode
-│   ├── execclient.go       # `dworm exec` client for the exec socket (framed mode)
+│   ├── execclient.go       # `dworm exec` client for the socket (framed mode)
 │   ├── status.go           # `dworm status` data (GetStatus, RunningInstance, WorkspaceFolder)
-│   ├── shell.go            # `dworm shell`/`dworm exec` via docker exec (stdio passthrough, ExitError)
+│   ├── shell.go            # `dworm exec --no-bridge` via docker exec (stdio passthrough, ExitError)
 │   ├── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
 │   └── tui/                # Terminal UI for interactive shell
 │       ├── model.go        # Main TUI session with PTY and 3-goroutine architecture
@@ -118,32 +124,46 @@ Shared constants (`internal/protocol/constants.go`):
 
 ### Host Binary (`cmd/dworm/`)
 
-Entry point uses Cobra with subcommands: `up`, `down`, `shell`, `exec`, `status`, `remove`, `rebuild`, `self-update`
+Entry point uses Cobra with subcommands: `up`, `stop`, `down`, `shell`, `exec`, `status`, `remove`, `rebuild`,
+`self-update`, and the hidden `__instance` (a detached instance, started by `ensure`)
 
 CLI flags:
-- `--version` / `-v`: Show version info (handled by Cobra)
+- `--version` / `-v`: Show version info (handled by Cobra; on subcommands `-v` is `--verbose`)
 - Async update check runs at startup, prints warning after command completes if newer version exists
 
-Key flows:
-- `up`: AcquireInstanceLock → DevcontainerUp → InjectAndStart → SendInit → handle port updates → ForwardPort
-- `down`: DevcontainerDown (finds container by label, docker stop)
-- `shell` / `exec`: start in the workspace folder from `host.WorkspaceFolder`: the running `up`'s state
-  file if it is for the same container, else `ResolveWorkspaceFolder` (`container.go`: the bind mount
-  containing the workspace path, mapped into the container; "" = image default). `exec --workdir/-w`
-  overrides it.
-- `status [--json]`: `host.GetStatus` (see below). Exits 0 when there is no container or no `up`.
-- `exec -- CMD...`: without a TTY and with a running `up`, runs over the exec socket (see "Exec over the
-  bridge"). Otherwise runs `docker exec -i` through the `--with-env` launcher. Stdin is always attached;
-  `-t` is added only when stdin and stdout are both terminals. stdout carries only the child's stdout
-  (all diagnostics go to stderr). The child's exit status becomes dworm's exit status
-  (`host.ExitError`, handled in `main()`); SIGINT/SIGTERM are forwarded to the docker CLI.
+Key flows (see "Instance lifecycle" below):
+- `up`: `ensure` (with `-e`/`-c`/`--bind` applied if it starts the instance); on a TTY then the TUI shell,
+  otherwise (or with `-d/--detach`) print a one-line summary and exit 0. Leaving the shell leaves the
+  instance running.
+- `up --foreground` (`--daemon` is a deprecated alias): run the instance in this process (systemd).
+  Exit code **3** (`exitAlreadyRunning`) if an instance already holds the lock.
+- `stop`: op `stop` over the socket (SIGTERM for instances without socket ops), wait until it exited.
+  The container keeps running. `down`, `remove`, `rebuild` stop the instance first.
+- `shell`: `ensure`, then a shell in the workspace folder.
+- `exec -- CMD...`: `ensure` (never applies `-e` to the instance; `-e` is per request), then run over
+  the socket (see "Exec over the bridge"). No silent `docker exec` fallback; `--no-bridge` runs plain
+  `docker exec -i[t]` through the `--with-env` launcher (workspace folder from `host.WorkspaceFolder`).
+  Stdin is always attached. stdout carries only the child's stdout (all diagnostics go to stderr). The
+  child's exit status becomes dworm's exit status (`host.ExitError`, handled in `main()`).
+- `--no-start` (`shell`, `exec`): fail instead of starting a stopped container. `-v/--verbose` shows
+  startup progress also when stderr is not a terminal; `--timeout` (default 15m) bounds the wait.
+- `status [--json]`: `host.GetStatus` (see below). Exits 0 when there is no container or no instance.
 - `remove [--force]`: DevcontainerRemove (finds container by label, docker stop + rm + rmi; prompts for confirmation unless `--force`)
 - `rebuild`: DevcontainerRebuild (calls `devcontainer up --remove-existing-container`; rebuilds and exits, user runs `up` separately)
 
 ### Exec over the bridge (`internal/host/execserver.go`, `internal/endpoint/exec.go`)
 
-Every running `dworm up` (TUI and daemon) listens on `<runtime dir>/<hash>.sock` (mode 0600, removed on
-exit, path in the state file as `exec_socket`). On Linux, `SO_PEERCRED` restricts it to the same UID.
+Every instance listens on `<runtime dir>/<hash>.sock` (mode 0600, removed on exit, path in the state
+file as `exec_socket`). On Linux, `SO_PEERCRED` restricts it to the same UID.
+
+The first request line (`ControlRequest`) has an `op`; a missing `op` means `exec` (v0.7.0 clients):
+
+| op | Purpose |
+|---|---|
+| `exec` | run one process (below) |
+| `events` | `{"history":N,"follow":true}`: event stream (see "Event stream") |
+| `status` | one reply line `{"ok":true,"status":{…InstanceState…}}`, then close |
+| `stop` | `{"ok":true}`, stop the instance; the connection closes once it has shut down |
 
 Client protocol (one connection = one process):
 - Client sends one JSON line: `{"version":1, "argv":[...], "cwd":"...", "env":{...}, "mode":"raw"|"framed"}`.
@@ -163,33 +183,60 @@ Client protocol (one connection = one process):
 
 The endpoint spawns with `Setpgid`, as the endpoint's user, resolving `argv[0]` with the merged `PATH`.
 
-`dworm exec` uses the socket in framed mode when stdin and stdout are not both terminals and
-`RunningInstance` reports an `exec_socket`; otherwise (or on `ErrExecSocketUnavailable` before the
-command started) it falls back to `docker exec -i[t]`. TTY sessions always use docker (`-t`). The
-client forwards SIGINT/SIGTERM/SIGHUP as signal frames; the exit frame's code becomes dworm's exit code.
+`dworm exec` uses the socket in framed mode when stdin and stdout are not both terminals (TTY sessions
+still use `docker exec -it`). The client forwards SIGINT/SIGTERM/SIGHUP as signal frames; the exit
+frame's code becomes dworm's exit code.
 
-### `dworm up` instance lock, state file, and lifecycle (`internal/host/instance.go`)
+### Event stream (op `events`, `internal/host/events.go`)
+
+After `{"ok":true}`, newline-delimited JSON. First a snapshot (current `state`, current `ports`, the
+last `history` log events from a ring buffer of 500), then live events unless `"follow":false`:
+`state` (`state`, `reason`), `ports` (`ports`), `log` (`source`, `level`, `message`). Each subscriber
+has a bounded queue (256); on overflow events are dropped and `{"type":"dropped","count":N}` is sent
+once there is room. Publishing never blocks the instance.
+
+### Instance lifecycle (`internal/host/instancerun.go`, `ensure.go`, `instance.go`)
+
+One long-lived **instance** per workspace owns the bridge (lock, state file, host env, `devcontainer up`,
+endpoint injection + init, tunnels, agent forwarding, socket). Every command is a client that first
+*ensures* the instance runs, then talks to it over the unix socket. `RunInstance` is shared by
+`up --foreground` (mode `foreground`, logs to stderr) and `dworm __instance` (mode `detached`).
 
 - Runtime dir: `$XDG_RUNTIME_DIR/dworm/`, fallback `/tmp/dworm-$UID/` (created/chmodded to 0700).
-- Files are named after `sha256(absolute workspace path)[:12]`: `<hash>.lock`, `<hash>.json`
-  (and `<hash>.sock`, see exec over the bridge). The short name keeps socket paths < 108 bytes.
-- `up` (TUI and daemon) takes `LOCK_EX|LOCK_NB` on `<hash>.lock` before anything else. If held:
-  exit code **3** (`exitAlreadyRunning` in `cmd/dworm/main.go`). The lock file is never deleted.
-  `InstanceRunning` probes with a momentary `LOCK_SH|LOCK_NB`; acquisition retries for ~250ms so a
-  concurrent probe cannot make `up` fail.
+- Files are named after `sha256(absolute workspace path)[:12]`: `<hash>.lock`, `<hash>.json`,
+  `<hash>.sock`, `<hash>.log` (+ `.log.1`). The short name keeps socket paths < 108 bytes.
+- The instance takes `LOCK_EX|LOCK_NB` on `<hash>.lock` before anything else (`ErrAlreadyRunning`
+  otherwise). The lock file is never deleted. `InstanceRunning` probes with a momentary
+  `LOCK_SH|LOCK_NB`; acquisition retries for ~250ms so a concurrent probe cannot make it fail.
+- **Socket first:** right after the lock, before `devcontainer up`. Until `ready`, exec requests get
+  `{"ok":false,"error":"not ready","code":"not_ready"}`.
+- States: `starting` (host env, `devcontainer up`) → `connecting` (endpoint) → `ready` → `stopping` →
+  `stopped` (reason `stop_requested`, `signal`) or `failed` (reason = error). Each change is a `state`
+  event and is mirrored in the state file.
+- **Detached start** (`ensure.go`): `dworm __instance` with the global flags (`-c`, `-e`, `--bind`),
+  cwd = workspace, `Setsid`, stdin `/dev/null`, stdout/stderr appended to `<hash>.log`. After taking the
+  lock it opens `RotatingLog` (5 MiB, rotated once to `.log.1`, stdout/stderr dup2'ed to follow).
+- **`Ensure`:** if the lock is held and the socket answers (op `status`), use it; otherwise spawn. A
+  spawned child that exits 3 lost the race to another instance, which counts as running. Waits up to
+  10s for the socket, then follows op `events` until `state: ready`; fails on `failed` (prints the
+  reason and the last log lines); on `stopped` it waits for the lock to be released and starts anew.
+  Progress (log events) goes to stderr when it is a TTY or with `-v`. Default timeout 15 min.
+- **Version check:** the state and op `status` carry `dworm_version`; `Ensure` rejects any mismatch
+  ("instance runs vX, this is vY; run `dworm stop`"). v0.7.0 instances (no ops) are detected by their
+  `unknown field "op"` error.
+- **Env:** `-e` on `up`/`shell` only applies when they start the instance. `env_hash` in the state
+  identifies the instance's CLI env; a different `-e` set prints a warning naming `dworm stop`.
 - State file `<hash>.json`, rewritten atomically (temp file + rename) by `StateFile.Update`, removed
   on exit. Fields: `pid`, `workspace_path`, `container_id`, `container_name`, `remote_user`,
   `workspace_folder` (in-container path), `started_at`, `endpoint_connected`, `ports`
-  (`[{port, address, local_port}]`: container port, host bind address, host port), `exec_socket`.
-  Updated after container start, endpoint init, exec socket start, every forwarded-port change, and on
-  bridge failure.
-  Only trust it while the lock is held.
-- Signals: `stopCtx` (SIGINT/SIGTERM) → clean shutdown, exit 0, container keeps running.
-  Bridge failure (control stream EOF) → exit 1 so systemd `Restart=on-failure` restarts it. Because
-  systemd signals the whole cgroup, a failure that coincides with a stop signal (500ms grace) is
-  treated as a stop.
-- Logs: `protocol.NewLogWriter` uses `CRWriter` only when the file is a terminal; the endpoint logs
-  plain lines to its stderr pipe.
+  (`[{port, address, local_port}]`: container port, host bind address, host port), `exec_socket`,
+  `state`, `reason`, `mode`, `reconnects`, `clients`, `log_path`, `dworm_version`, `env_hash`.
+  Only trust it while the lock is held; op `status` returns the same structure live.
+- Stopping: op `stop` or SIGINT/SIGTERM → clean shutdown, exit 0, container keeps running. Running
+  execs are terminated (process groups, see below). `StopInstance` waits until the stopped PID is gone.
+- Logs: every log line becomes a `log` event (source `host`, `endpoint`, `devcontainer`; level
+  inferred from "warning"/"error"/"failed") and is written, timestamped, to the instance output.
+  `protocol.NewLogWriter` uses `CRWriter` only when the file is a terminal.
 
 ### `dworm status --json` (`internal/host/status.go`)
 
@@ -303,6 +350,12 @@ Test files:
 - `internal/endpoint/portscanner_test.go` - /proc/net/tcp parsing, port diff logic
 - `internal/host/agent_test.go` - SSH/GPG/git credential stream routing
 - `internal/host/instance_test.go` - Instance lock exclusivity/probing, state file
+- `internal/host/instancerun_test.go` - Instance with fake container/endpoint deps: socket before ready
+  (`not_ready`), state sequence, stop op, failure, op dispatch and op-less (v0.7.0) requests. Its
+  `TestMain` turns the test binary into a fake detached instance for `ensure_test.go`
+- `internal/host/ensure_test.go` - Concurrent ensures share one instance, version mismatch, env warning,
+  `--no-start`
+- `internal/host/events_test.go` - Event bus snapshot/live/history, slow-subscriber drop marker, JSON shape
 - `internal/host/status_test.go` - Status JSON shape, metadata/remote user parsing (fake `docker`)
 - `internal/protocol/exec_test.go` - Exec frame/message encoding and size limits
 - `internal/endpoint/exec_test.go` - Exec streams over the harness: stdio, env/cwd, signals, exit codes,
@@ -329,9 +382,10 @@ E2E scripts in `test/e2e/`:
 - `test-port-forward.sh` - Port forwarding test
 - `test-env-vars.sh` - Environment variable forwarding
 - `test-exec-stdio.sh` - `dworm exec` stdin/stdout passthrough, stdin EOF, exit codes, working directory
+  (via the instance and with `--no-bridge`)
 - `test-exec-socket.sh` - Raw socket client (python3), `dworm exec` via the socket, no processes left
   after killed callers or `up` shutdown (`pgrep` in the container)
-- `test-daemon.sh` - `up --daemon` single instance (exit 3), state file, `status --json`, SIGTERM exit 0, bridge failure exit ≠ 0
+- `test-daemon.sh` - `up --foreground` single instance (exit 3), state file, `status --json`, SIGTERM exit 0, bridge failure exit ≠ 0
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
 - `test-git-creds.sh` - Git credential forwarding (conditional)
@@ -343,8 +397,8 @@ Conditional tests use exit code 77 to skip (autotools convention).
 ### Manual Testing
 
 ```bash
-# Start test devcontainer (run from project root)
-dworm up --daemon
+# Start test devcontainer and its instance (run from project root)
+dworm up -d
 
 # In another terminal, start a server in container
 docker exec <container> python3 -m http.server 8080

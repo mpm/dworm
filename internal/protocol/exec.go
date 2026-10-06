@@ -56,6 +56,7 @@ type ExecReply struct {
 	OK       bool   `json:"ok"`
 	ID       string `json:"id,omitempty"`
 	Error    string `json:"error,omitempty"`
+	Code     string `json:"code,omitempty"` // machine-readable error, e.g. "not_ready"
 	ExitCode int    `json:"exit_code,omitempty"`
 }
 

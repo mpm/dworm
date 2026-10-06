@@ -16,9 +16,14 @@ type PortMapping struct {
 	LocalPort     int
 }
 
+// tunnelOpener opens a bridge stream to a container port.
+type tunnelOpener interface {
+	OpenTunnelStream(port int) (net.Conn, error)
+}
+
 // TunnelManager manages port forwarding from container to host
 type TunnelManager struct {
-	endpoint     *EndpointManager
+	endpoint     tunnelOpener
 	listeners    map[int]net.Listener
 	mu           sync.Mutex
 	logger       *log.Logger
@@ -35,7 +40,7 @@ type TunnelManager struct {
 // NewTunnelManager creates a new tunnel manager.
 // bindAddr specifies the address to bind forwarded ports to (e.g., "127.0.0.1" or "0.0.0.0").
 // logger is used for tunnel log messages; it must not be nil.
-func NewTunnelManager(endpoint *EndpointManager, bindAddr string, logger *log.Logger) *TunnelManager {
+func NewTunnelManager(endpoint tunnelOpener, bindAddr string, logger *log.Logger) *TunnelManager {
 	if bindAddr == "" {
 		bindAddr = "127.0.0.1"
 	}

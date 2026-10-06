@@ -2,8 +2,10 @@ package host
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -20,16 +22,20 @@ type ContainerInfo struct {
 
 // DevcontainerUp starts a devcontainer and returns container info.
 // If configPath is non-empty, it is passed to devcontainer CLI as --config.
-func DevcontainerUp(workspacePath, configPath string) (*ContainerInfo, error) {
+// The CLI's progress output (stderr) is copied to progress when non-nil.
+func DevcontainerUp(ctx context.Context, workspacePath, configPath string, progress io.Writer) (*ContainerInfo, error) {
 	args := []string{"up", "--workspace-folder", workspacePath}
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
-	cmd := exec.Command("devcontainer", args...)
+	cmd := exec.CommandContext(ctx, "devcontainer", args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if progress != nil {
+		cmd.Stderr = io.MultiWriter(&stderr, progress)
+	}
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("devcontainer up failed: %w\nstderr: %s", err, stderr.String())

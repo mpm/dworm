@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -22,23 +20,33 @@ import (
 	"github.com/mpm/dworm/internal/protocol"
 	"github.com/mpm/dworm/internal/version"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
-	envVars    []string
-	daemonMode bool
-	configPath string
-	bindAddr   string
-	execDir    string
-	statusJSON bool
-	crStderr   = protocol.NewLogWriter(os.Stderr)
-	crStdout   = protocol.NewLogWriter(os.Stdout)
-	logger     = log.New(crStderr, "", log.LstdFlags)
+	envVars       []string
+	configPath    string
+	bindAddr      string
+	execDir       string
+	statusJSON    bool
+	upDetach      bool
+	upForeground  bool
+	upDaemon      bool
+	verbose       bool
+	ensureTimeout time.Duration
+	noStart       bool
+	noBridge      bool
+	crStderr      = protocol.NewLogWriter(os.Stderr)
+	crStdout      = protocol.NewLogWriter(os.Stdout)
+	logger        = log.New(crStderr, "", log.LstdFlags)
 )
 
-// exitAlreadyRunning is the exit code of `dworm up` when another `dworm up`
-// already holds the workspace lock.
+// exitAlreadyRunning is the exit code of `dworm up --foreground` when an
+// instance already holds the workspace lock.
 const exitAlreadyRunning = 3
+
+// stopTimeout bounds how long stopping an instance may take.
+const stopTimeout = 30 * time.Second
 
 // exitCodeError is an error that main prints before exiting with code.
 type exitCodeError struct {
@@ -71,18 +79,48 @@ environments.`,
 	// Up command
 	upCmd := &cobra.Command{
 		Use:   "up",
-		Short: "Start container, inject endpoint, establish tunnel",
-		Args:  cobra.NoArgs,
-		RunE:  runOperationalCommand(runUp),
+		Short: "Start the workspace instance (container and bridge) and open a shell",
+		Long: `Make sure the workspace instance runs: the long-lived background process that
+owns the container's bridge (port forwarding, agent and credential forwarding,
+the exec socket). It is started detached if needed.
+
+On a terminal, dworm up then opens the interactive shell; leaving the shell
+leaves the instance running (dworm stop or dworm down end it). With -d, or
+without a terminal, it waits until the instance is ready and exits.`,
+		Args: cobra.NoArgs,
+		RunE: runOperationalCommand(runUp),
 	}
-	upCmd.Flags().BoolVar(&daemonMode, "daemon", false, "Run in daemon mode (no shell)")
+	upCmd.Flags().BoolVarP(&upDetach, "detach", "d", false, "Only ensure the instance runs; don't open a shell")
+	upCmd.Flags().BoolVar(&upForeground, "foreground", false, "Run the instance in the foreground (for systemd)")
+	upCmd.Flags().BoolVar(&upDaemon, "daemon", false, "Alias of --foreground")
+	upCmd.Flags().MarkDeprecated("daemon", "use --foreground")
 	upCmd.Flags().StringVar(&bindAddr, "bind", "127.0.0.1", "Address to bind forwarded ports to (e.g., 0.0.0.0 for all interfaces)")
+	addEnsureFlags(upCmd)
 	rootCmd.AddCommand(upCmd)
+
+	instanceCmd := &cobra.Command{
+		Use:    host.InstanceCommand,
+		Short:  "Run a detached instance (started by other dworm commands)",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: runOperationalCommand(func(cmd *cobra.Command, args []string) error {
+			return runInstance(cmd, host.ModeDetached)
+		}),
+	}
+	instanceCmd.Flags().StringVar(&bindAddr, "bind", "127.0.0.1", "Address to bind forwarded ports to")
+	rootCmd.AddCommand(instanceCmd)
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "stop",
+		Short: "Stop the workspace instance and leave the container running",
+		Args:  cobra.NoArgs,
+		RunE:  runOperationalCommand(runStop),
+	})
 
 	// Down command
 	downCmd := &cobra.Command{
 		Use:   "down",
-		Short: "Stop the devcontainer",
+		Short: "Stop the workspace instance and the devcontainer",
 		Args:  cobra.NoArgs,
 		RunE:  runOperationalCommand(runDown),
 	}
@@ -95,6 +133,8 @@ environments.`,
 		Args:  cobra.NoArgs,
 		RunE:  runOperationalCommand(runShell),
 	}
+	addEnsureFlags(shellCmd)
+	shellCmd.Flags().BoolVar(&noStart, "no-start", false, "Fail instead of starting a stopped container")
 	rootCmd.AddCommand(shellCmd)
 
 	// Exec command
@@ -105,6 +145,9 @@ environments.`,
 		RunE:  runOperationalCommand(runExec),
 	}
 	execCmd.Flags().StringVarP(&execDir, "workdir", "w", "", "Working directory inside the container (default: the workspace folder)")
+	execCmd.Flags().BoolVar(&noStart, "no-start", false, "Fail instead of starting a stopped container")
+	execCmd.Flags().BoolVar(&noBridge, "no-bridge", false, "Run through plain `docker exec` instead of the instance (no forwarding, no process cleanup)")
+	addEnsureFlags(execCmd)
 	rootCmd.AddCommand(execCmd)
 
 	// Status command
@@ -232,389 +275,202 @@ func parseEnvVars() map[string]string {
 	return result
 }
 
-// getGPGAgentSocket returns the GPG agent socket path using gpgconf
-func getGPGAgentSocket() (string, error) {
-	cmd := exec.Command("gpgconf", "--list-dirs", "agent-socket")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("gpgconf failed: %w", err)
-	}
-	socketPath := strings.TrimSpace(string(output))
-	if socketPath == "" {
-		return "", fmt.Errorf("gpgconf returned empty socket path")
-	}
-	// Check if socket exists
-	if _, err := os.Stat(socketPath); err != nil {
-		return "", fmt.Errorf("GPG agent socket does not exist: %s", socketPath)
-	}
-	return socketPath, nil
+func addEnsureFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show instance startup progress even when stderr is not a terminal")
+	cmd.Flags().DurationVar(&ensureTimeout, "timeout", host.DefaultEnsureTimeout, "How long to wait for the instance to become ready")
 }
 
-func runUp(cmd *cobra.Command, args []string) error {
+// runInstance runs the workspace instance in this process.
+func runInstance(cmd *cobra.Command, mode string) error {
 	workspacePath, err := getWorkspacePath()
 	if err != nil {
 		return err
 	}
-
 	cfgPath, err := getConfigPath()
 	if err != nil {
 		return err
 	}
+	opts := host.InstanceOptions{
+		WorkspacePath: workspacePath,
+		ConfigPath:    cfgPath,
+		Env:           parseEnvVars(),
+		Mode:          mode,
+		Version:       version.Version,
+		Output:        crStderr,
+	}
+	if cmd.Flags().Changed("bind") {
+		opts.BindAddr = bindAddr
+	}
+	if mode == host.ModeDetached {
+		paths := host.InstancePathsFor(workspacePath)
+		opts.LogPath = paths.Log
+		opts.OpenOutput = func() (io.Writer, error) {
+			return host.OpenRotatingLog(paths.Log, host.MaxInstanceLogSize, true)
+		}
+	}
 
-	// One `dworm up` per workspace. The kernel drops the lock on exit or crash.
-	lock, err := host.AcquireInstanceLock(workspacePath)
+	// SIGINT/SIGTERM stop the instance cleanly (exit 0, container keeps running).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	err = host.RunInstance(ctx, opts)
 	if errors.Is(err, host.ErrAlreadyRunning) {
 		holder := ""
 		if state, stateErr := host.ReadInstanceState(host.InstancePathsFor(workspacePath).State); stateErr == nil {
 			holder = fmt.Sprintf(" (pid %d)", state.PID)
 		}
 		return &exitCodeError{code: exitAlreadyRunning, err: fmt.Errorf(
-			"dworm up is already running for %s%s; use 'dworm shell' or 'dworm exec' alongside it", workspacePath, holder)}
+			"a dworm instance is already running for %s%s; use 'dworm shell' or 'dworm exec' with it, or 'dworm stop' it", workspacePath, holder)}
 	}
-	if err != nil {
-		return err
-	}
-	defer lock.Release()
-	state, err := host.NewStateFile(lock.Paths.State, host.InstanceState{
-		PID:           os.Getpid(),
-		WorkspacePath: workspacePath,
-		StartedAt:     time.Now().UTC(),
-	})
-	if err != nil {
-		return fmt.Errorf("write state file: %w", err)
-	}
-	updateState := func(change func(*host.InstanceState)) {
-		if err := state.Update(change); err != nil {
-			logger.Printf("Warning: failed to update state file: %v", err)
-		}
-	}
-
-	projectConfig, staticEnv, err := config.Load(workspacePath)
-	if err != nil {
-		return err
-	}
-	if !cmd.Flags().Changed("bind") && projectConfig.Bind != "" {
-		bindAddr = projectConfig.Bind
-	}
-	// stopCtx ends only on SIGINT/SIGTERM: a requested stop exits 0 and leaves
-	// the container running. ctx is additionally cancelled on bridge failure.
-	stopCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	ctx, cancel := context.WithCancel(stopCtx)
-	defer cancel()
-	cliEnv := parseEnvVars()
-	if err := config.Validate(cliEnv); err != nil {
-		return err
-	}
-	generatedEnv, err := host.RunEnvironmentCommand(ctx, workspacePath, projectConfig.HostEnv, os.Stderr)
-	if stopCtx.Err() != nil {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	envs := config.Merge(staticEnv, generatedEnv, cliEnv)
-
-	logger.Printf("Starting devcontainer at %s...", workspacePath)
-
-	// Start container
-	containerInfo, err := host.DevcontainerUp(workspacePath, cfgPath)
-	if err != nil {
-		return fmt.Errorf("failed to start devcontainer: %w", err)
-	}
-
-	logger.Printf("Container started: %s", containerInfo.ContainerName)
-	if stopCtx.Err() != nil {
-		return nil
-	}
-	updateState(func(s *host.InstanceState) {
-		s.ContainerID = containerInfo.ContainerID
-		s.ContainerName = containerInfo.ContainerName
-		s.RemoteUser = containerInfo.RemoteUser
-		s.WorkspaceFolder = containerInfo.WorkspaceDir
-	})
-
-	// In interactive (non-daemon) mode, route logs to a buffer for the TUI
-	var logBuffer *tui.LogBuffer
-	var logUpdateCh <-chan struct{}
-	var logWriter io.Writer
-	if !daemonMode {
-		logBuffer, logUpdateCh = tui.NewLogBuffer(100)
-		logWriter = logBuffer
-		// Redirect the main logger to the buffer
-		logger.SetOutput(logWriter)
-	}
-
-	// Create endpoint manager (pass logWriter; nil in daemon mode falls back to stderr)
-	endpoint := host.NewEndpointManager(containerInfo.ContainerID, logWriter)
-
-	// Inject and start endpoint
-	if err := endpoint.InjectAndStart(); err != nil {
-		if stopCtx.Err() != nil {
-			return nil
-		}
-		return fmt.Errorf("failed to start endpoint: %w", err)
-	}
-
-	// Check for SSH agent forwarding
-	hostSSHSocket := os.Getenv("SSH_AUTH_SOCK")
-	sshForward := hostSSHSocket != ""
-	containerSSHSocket := protocol.SSHAgentSocketPath
-
-	if !sshForward {
-		logger.Printf("Warning: SSH agent forwarding disabled (SSH_AUTH_SOCK not set)")
-	} else {
-		// Verify socket exists
-		if _, err := os.Stat(hostSSHSocket); err != nil {
-			logger.Printf("Warning: SSH agent forwarding disabled (socket not found: %s)", hostSSHSocket)
-			sshForward = false
-		}
-	}
-
-	// Check for GPG agent forwarding
-	hostGPGSocket, gpgErr := getGPGAgentSocket()
-	gpgForward := gpgErr == nil
-	containerGPGSocket := protocol.GPGAgentSocketPath
-
-	// Export GPG public keys if forwarding is enabled
-	gpgPublicKeys := ""
-	if gpgForward {
-		exportCmd := exec.Command("gpg", "--export", "--armor")
-		if output, err := exportCmd.Output(); err != nil {
-			logger.Printf("Warning: failed to export GPG public keys: %v", err)
-		} else if len(output) > 0 {
-			gpgPublicKeys = string(output)
-			logger.Printf("Exported GPG public keys (%d bytes)", len(output))
-		}
-	}
-
-	if !gpgForward {
-		logger.Printf("Warning: GPG agent forwarding disabled (%v)", gpgErr)
-	}
-
-	// Read host's git config
-	gitConfig := ""
-	homeDir, homeErr := os.UserHomeDir()
-	if homeErr == nil {
-		gitConfigPath := filepath.Join(homeDir, ".gitconfig")
-		if content, err := os.ReadFile(gitConfigPath); err == nil {
-			gitConfig = string(content)
-			logger.Printf("Read host git config (%d bytes)", len(content))
-		} else {
-			logger.Printf("Warning: could not read host git config: %v", err)
-		}
-	}
-
-	// Check for git credential forwarding (enabled if git is available on host)
-	gitCredForward := false
-	if _, err := exec.LookPath("git"); err == nil {
-		gitCredForward = true
-	} else {
-		logger.Printf("Warning: git credential forwarding disabled (git not found on host)")
-	}
-
-	// Send init message
-	if err := endpoint.SendInit(envs, sshForward, containerSSHSocket, gpgForward, containerGPGSocket, gitConfig, gitCredForward, gpgPublicKeys); err != nil {
-		endpoint.Close()
-		return fmt.Errorf("failed to send init: %w", err)
-	}
-	defer endpoint.Close()
-	if err := endpoint.WaitEnvironmentReady(); err != nil {
-		if stopCtx.Err() != nil {
-			return nil
-		}
-		return fmt.Errorf("initialize environment: %w", err)
-	}
-	updateState(func(s *host.InstanceState) { s.EndpointConnected = true })
-
-	if sshForward {
-		logger.Printf("SSH agent forwarding enabled")
-		// Add SSH_AUTH_SOCK to env vars for the shell
-		envs["SSH_AUTH_SOCK"] = containerSSHSocket
-	}
-
-	if gpgForward {
-		logger.Printf("GPG agent forwarding enabled")
-		// Note: The endpoint creates the socket at the path GPG expects,
-		// so no environment variable is needed - GPG will find it automatically
-	}
-
-	if gitCredForward {
-		logger.Printf("Git credential forwarding enabled")
-	}
-
-	logger.Printf("Endpoint initialized with %d env vars", len(envs))
-	interval, _, _ := projectConfig.HostEnv.Durations()
-	refreshDone := make(chan struct{})
-	go func() {
-		defer close(refreshDone)
-		host.RefreshEnvironment(ctx, interval, func() error {
-			generated, err := host.RunEnvironmentCommand(ctx, workspacePath, projectConfig.HostEnv, logger.Writer())
-			if err != nil {
-				return err
-			}
-			next := config.Merge(staticEnv, generated, cliEnv)
-			if sshForward {
-				next["SSH_AUTH_SOCK"] = containerSSHSocket
-			}
-			return endpoint.GetMux().SendControl(protocol.TypeEnvironment, next)
-		}, func(err error) { logger.Printf("Environment refresh failed (keeping previous values): %v", err) })
-	}()
-	defer func() {
-		cancel()
-		endpoint.GetMux().Close()
-		select {
-		case <-refreshDone:
-		case <-time.After(2 * time.Second):
-		}
-	}()
-
-	// Start agent handler if any forwarding is enabled
-	var agentHandler *host.AgentHandler
-	if sshForward || gpgForward || gitCredForward {
-		agentHandler = host.NewAgentHandler(endpoint.GetMux(), hostSSHSocket, logger)
-		if gpgForward {
-			agentHandler.SetGPGSocketPath(hostGPGSocket)
-		}
-		agentHandler.Start()
-	}
-
-	// Create tunnel manager and port update channel
-	tunnelLogWriter := protocol.NewLogWriter(os.Stderr)
-	if logWriter != nil {
-		tunnelLogWriter = logWriter
-	}
-	tunnelLogger := log.New(tunnelLogWriter, "[tunnel] ", log.LstdFlags)
-
-	// Local exec socket: runs processes over this bridge (see `dworm exec`).
-	execServer, execErr := host.NewExecServer(lock.Paths.Socket, func() (net.Conn, error) {
-		return endpoint.GetMux().OpenStream()
-	}, containerInfo.WorkspaceDir, log.New(tunnelLogWriter, "", log.LstdFlags))
-	if execErr != nil {
-		logger.Printf("Warning: exec socket disabled: %v", execErr)
-	} else {
-		updateState(func(s *host.InstanceState) { s.ExecSocket = execServer.Path() })
-	}
-	tunnels := host.NewTunnelManager(endpoint, bindAddr, tunnelLogger)
-	portUpdateCh := make(chan []host.PortMapping, 10)
-	tunnels.SetPortUpdateChannel(portUpdateCh)
-
-	// Convert port updates to TUI format
-	tuiPortUpdateCh := make(chan []tui.PortMapping, 10)
-	go func() {
-		for ports := range portUpdateCh {
-			tuiPorts := make([]tui.PortMapping, len(ports))
-			statePorts := make([]host.StatePort, len(ports))
-			for i, p := range ports {
-				tuiPorts[i] = tui.PortMapping{
-					ContainerPort: p.ContainerPort,
-					LocalPort:     p.LocalPort,
-				}
-				statePorts[i] = host.StatePort{Port: p.ContainerPort, Address: bindAddr, LocalPort: p.LocalPort}
-			}
-			updateState(func(s *host.InstanceState) { s.Ports = statePorts })
-			select {
-			case tuiPortUpdateCh <- tuiPorts:
-			default:
-			}
-		}
-	}()
-
-	// Handle control messages
-	transportFailureCh := make(chan error, 1)
-	go func() {
-		for {
-			msgType, data, err := endpoint.RecvControl()
-			if err != nil {
-				if ctx.Err() != nil {
-					// Shutdown closed the bridge.
-					return
-				}
-				transportErr := fmt.Errorf("endpoint transport failed: %w", err)
-				cancel()
-				updateState(func(s *host.InstanceState) { s.EndpointConnected = false })
-				logger.Printf("Forwarding stopped: %v", transportErr)
-				tunnels.Close()
-				transportFailureCh <- transportErr
-				return
-			}
-
-			switch msgType {
-			case protocol.TypePortUpdate:
-				portMsg, err := protocol.DecodePortUpdate(data)
-				if err != nil {
-					logger.Printf("Failed to decode port update: %v", err)
-					continue
-				}
-				tunnels.UpdatePorts(portMsg.Ports)
-			}
-		}
-	}()
-
-	if daemonMode {
-		logger.Printf("Running in daemon mode. Press Ctrl+C to stop.")
-		select {
-		case <-stopCtx.Done():
-		case err = <-transportFailureCh:
-		}
-		// systemd signals the whole cgroup, so the docker exec carrying the
-		// bridge may die just before our own SIGTERM is delivered. A stop that
-		// arrives with the failure is still a clean shutdown.
-		if err != nil && stopRequested(stopCtx, 500*time.Millisecond) {
-			err = nil
-		}
-		if err == nil {
-			logger.Printf("Shutting down...")
-		}
-	} else {
-		// Start interactive shell with TUI
-		shellErr := tui.Run(
-			containerInfo.ContainerID,
-			containerInfo.ContainerName,
-			containerInfo.WorkspaceDir,
-			nil,
-			tuiPortUpdateCh,
-			logBuffer,
-			logUpdateCh,
-			transportFailureCh,
-		)
-		if shellErr != nil {
-			// Check if it's just an exit code
-			if !strings.HasPrefix(shellErr.Error(), "exit ") {
-				logger.Printf("Shell error: %v", shellErr)
-				if strings.HasPrefix(shellErr.Error(), "endpoint transport failed:") && !stopRequested(stopCtx, 500*time.Millisecond) {
-					err = shellErr
-				}
-			}
-		}
-	}
-
-	cancel()
-	if execServer != nil {
-		execServer.Close()
-	}
-	tunnels.Close()
-	if agentHandler != nil {
-		agentHandler.Close()
-	}
-	endpoint.Close()
-
 	return err
 }
 
-// stopRequested reports whether SIGINT/SIGTERM arrived, waiting up to grace.
-func stopRequested(stopCtx context.Context, grace time.Duration) bool {
-	select {
-	case <-stopCtx.Done():
-		return true
-	case <-time.After(grace):
-		return false
+// ensureInstance makes sure the workspace instance runs and is ready. With
+// applyEnv, -e values are passed to an instance this call starts.
+func ensureInstance(cmd *cobra.Command, applyEnv bool) (*host.InstanceState, error) {
+	workspacePath, err := getWorkspacePath()
+	if err != nil {
+		return nil, err
 	}
+	var args []string
+	if cfgPath, err := getConfigPath(); err != nil {
+		return nil, err
+	} else if cfgPath != "" {
+		args = append(args, "-c", cfgPath)
+	}
+	var env map[string]string
+	if applyEnv {
+		env = parseEnvVars()
+		if err := config.Validate(env); err != nil {
+			return nil, err
+		}
+		for _, e := range envVars {
+			args = append(args, "-e", e)
+		}
+	}
+	if flag := cmd.Flags().Lookup("bind"); flag != nil && flag.Changed {
+		args = append(args, "--bind", bindAddr)
+	}
+	var progress io.Writer
+	if verbose || term.IsTerminal(int(os.Stderr.Fd())) {
+		progress = crStderr
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return host.Ensure(ctx, host.EnsureOptions{
+		WorkspacePath: workspacePath,
+		SpawnArgs:     args,
+		Env:           env,
+		NoStart:       noStart,
+		Timeout:       ensureTimeout,
+		Progress:      progress,
+		Warnings:      crStderr,
+		Version:       version.Version,
+	})
+}
+
+func runUp(cmd *cobra.Command, args []string) error {
+	if upForeground || upDaemon {
+		return runInstance(cmd, host.ModeForeground)
+	}
+	state, err := ensureInstance(cmd, true)
+	if err != nil {
+		return err
+	}
+	if upDetach || !host.StdioIsTerminal() {
+		fmt.Fprintln(os.Stdout, instanceSummary(state))
+		return nil
+	}
+	return runShellSession(state)
+}
+
+// instanceSummary is the one-line summary of `dworm up -d`.
+func instanceSummary(state *host.InstanceState) string {
+	ports := "none"
+	if len(state.Ports) > 0 {
+		parts := make([]string, len(state.Ports))
+		for i, p := range state.Ports {
+			parts[i] = fmt.Sprintf("%d", p.Port)
+			if p.LocalPort != p.Port {
+				parts[i] = fmt.Sprintf("%d->%d", p.LocalPort, p.Port)
+			}
+		}
+		ports = strings.Join(parts, " ")
+	}
+	return fmt.Sprintf("dworm instance ready: container %s, pid %d, ports: %s", state.ContainerName, state.PID, ports)
+}
+
+// runShellSession opens the interactive TUI shell of a ready instance.
+func runShellSession(state *host.InstanceState) error {
+	events, err := host.SubscribeEvents(state.ExecSocket, 100, true)
+	if err != nil {
+		return fmt.Errorf("subscribe to instance events: %w", err)
+	}
+	defer events.Close()
+	portCh := make(chan []tui.PortMapping, 10)
+	logBuffer, logUpdateCh := tui.NewLogBuffer(100)
+	go func() {
+		for {
+			event, err := events.Next()
+			if err != nil {
+				return
+			}
+			switch event.Type {
+			case host.EventPorts:
+				ports := make([]tui.PortMapping, len(event.Ports))
+				for i, p := range event.Ports {
+					ports[i] = tui.PortMapping{ContainerPort: p.Port, LocalPort: p.LocalPort}
+				}
+				select {
+				case portCh <- ports:
+				default:
+				}
+			case host.EventLog:
+				fmt.Fprintf(logBuffer, "[%s] %s\n", event.Source, event.Message)
+			}
+		}
+	}()
+	shellErr := tui.Run(state.ContainerID, state.ContainerName, state.WorkspaceFolder, nil, portCh, logBuffer, logUpdateCh, nil)
+	if shellErr != nil && !strings.HasPrefix(shellErr.Error(), "exit ") {
+		return shellErr
+	}
+	return nil
+}
+
+func runStop(cmd *cobra.Command, args []string) error {
+	workspacePath, err := getWorkspacePath()
+	if err != nil {
+		return err
+	}
+	stopped, err := host.StopInstance(workspacePath, stopTimeout)
+	if err != nil {
+		return err
+	}
+	if stopped {
+		logger.Printf("Instance stopped")
+	} else {
+		logger.Printf("No dworm instance is running for %s", workspacePath)
+	}
+	return nil
+}
+
+// stopInstanceFirst stops a running instance before container operations.
+func stopInstanceFirst(workspacePath string) error {
+	stopped, err := host.StopInstance(workspacePath, stopTimeout)
+	if err != nil {
+		return fmt.Errorf("stop the dworm instance: %w", err)
+	}
+	if stopped {
+		logger.Printf("Instance stopped")
+	}
+	return nil
 }
 
 func runDown(cmd *cobra.Command, args []string) error {
 	workspacePath, err := getWorkspacePath()
 	if err != nil {
+		return err
+	}
+	if err := stopInstanceFirst(workspacePath); err != nil {
 		return err
 	}
 
@@ -629,42 +485,43 @@ func runDown(cmd *cobra.Command, args []string) error {
 }
 
 func runShell(cmd *cobra.Command, args []string) error {
-	workspacePath, err := getWorkspacePath()
+	state, err := ensureInstance(cmd, true)
 	if err != nil {
 		return err
 	}
-
-	// Get container ID
-	containerID, err := host.GetContainerID(workspacePath)
-	if err != nil {
-		return fmt.Errorf("failed to get container ID: %w", err)
-	}
-
-	return host.ExecShell(containerID, host.WorkspaceFolder(containerID, workspacePath), parseEnvVars())
+	return host.ExecShell(state.ContainerID, state.WorkspaceFolder, nil)
 }
 
 func runExec(cmd *cobra.Command, args []string) error {
+	if noBridge {
+		return runExecNoBridge(args)
+	}
+	state, err := ensureInstance(cmd, false)
+	if err != nil {
+		return err
+	}
+	if host.StdioIsTerminal() {
+		workDir := execDir
+		if workDir == "" {
+			workDir = state.WorkspaceFolder
+		}
+		return host.ExecCommand(state.ContainerID, workDir, parseEnvVars(), args)
+	}
+	// The instance's endpoint terminates the process group when this client
+	// goes away.
+	return host.ExecViaSocket(state.ExecSocket, protocol.ExecRequest{
+		Argv: args,
+		Cwd:  execDir,
+		Env:  parseEnvVars(),
+	}, os.Stdin, os.Stdout, os.Stderr)
+}
+
+// runExecNoBridge runs the command through plain `docker exec`.
+func runExecNoBridge(args []string) error {
 	workspacePath, err := getWorkspacePath()
 	if err != nil {
 		return err
 	}
-
-	// Without a TTY, run over a running `dworm up`: its endpoint terminates the
-	// process group when this client goes away. TTY sessions need docker -t.
-	if !host.StdioIsTerminal() {
-		if state, _ := host.RunningInstance(workspacePath); state != nil && state.ExecSocket != "" {
-			err := host.ExecViaSocket(state.ExecSocket, protocol.ExecRequest{
-				Argv: args,
-				Cwd:  execDir,
-				Env:  parseEnvVars(),
-			}, os.Stdin, os.Stdout, os.Stderr)
-			if !errors.Is(err, host.ErrExecSocketUnavailable) {
-				return err
-			}
-			logger.Printf("Warning: %v; falling back to docker exec", err)
-		}
-	}
-
 	containerID, err := host.GetContainerID(workspacePath)
 	if err != nil {
 		return fmt.Errorf("failed to get container ID: %w", err)
@@ -692,6 +549,9 @@ func runRemove(cmd *cobra.Command, args []string, force bool) error {
 			return nil
 		}
 	}
+	if err := stopInstanceFirst(workspacePath); err != nil {
+		return err
+	}
 
 	logger.Printf("Removing devcontainer at %s...", workspacePath)
 
@@ -711,6 +571,9 @@ func runRebuild(cmd *cobra.Command, args []string) error {
 
 	cfgPath, err := getConfigPath()
 	if err != nil {
+		return err
+	}
+	if err := stopInstanceFirst(workspacePath); err != nil {
 		return err
 	}
 

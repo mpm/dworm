@@ -116,7 +116,11 @@ func newExecServerFixture(t *testing.T, endpoint *fakeExecEndpoint) *execServerF
 	go endpoint.serve(h.EndpointMux)
 	logs := &syncBuffer{}
 	path := filepath.Join(t.TempDir(), "exec.sock")
-	server, err := NewExecServer(path, h.HostMux.OpenStream, "/workspaces/app", log.New(logs, "", 0))
+	server, err := NewExecServer(path, ExecServerConfig{
+		Open:            h.HostMux.OpenStream,
+		WorkspaceFolder: func() string { return "/workspaces/app" },
+		Logger:          log.New(logs, "", 0),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

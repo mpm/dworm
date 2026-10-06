@@ -148,6 +148,11 @@ func (e *EndpointManager) GetMux() *protocol.Mux {
 	return e.mux
 }
 
+// Mux returns the bridge multiplexer (endpointConn).
+func (e *EndpointManager) Mux() *protocol.Mux {
+	return e.mux
+}
+
 // RecvControl receives a control message
 func (e *EndpointManager) RecvControl() (string, []byte, error) {
 	return e.mux.RecvControl()
@@ -155,9 +160,15 @@ func (e *EndpointManager) RecvControl() (string, []byte, error) {
 
 // WaitEnvironmentReady is called before starting the general control reader.
 func (e *EndpointManager) WaitEnvironmentReady() error {
+	return waitEnvironmentReady(e.mux, 30*time.Second)
+}
+
+// waitEnvironmentReady reads the endpoint's answer to init. It closes the mux
+// on timeout.
+func waitEnvironmentReady(mux *protocol.Mux, timeout time.Duration) error {
 	result := make(chan error, 1)
 	go func() {
-		kind, data, err := e.RecvControl()
+		kind, data, err := mux.RecvControl()
 		if err == nil {
 			err = checkEnvironmentReady(kind, data)
 		}
@@ -166,8 +177,8 @@ func (e *EndpointManager) WaitEnvironmentReady() error {
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(30 * time.Second):
-		e.mux.Close()
+	case <-time.After(timeout):
+		mux.Close()
 		return fmt.Errorf("timed out waiting for environment initialization")
 	}
 }
@@ -196,11 +207,16 @@ func checkEnvironmentReady(kind string, data []byte) error {
 
 // OpenTunnelStream opens a new stream for tunneling to a port
 func (e *EndpointManager) OpenTunnelStream(port int) (net.Conn, error) {
-	stream, err := e.mux.OpenStream()
+	return openTunnelStream(e.mux, port, e.setupTimeout)
+}
+
+// openTunnelStream opens a tunnel stream to port and waits for the endpoint
+// to confirm the connection.
+func openTunnelStream(mux *protocol.Mux, port int, setupTimeout time.Duration) (net.Conn, error) {
+	stream, err := mux.OpenStream()
 	if err != nil {
 		return nil, err
 	}
-	setupTimeout := e.setupTimeout
 	if setupTimeout == 0 {
 		setupTimeout = protocol.TunnelSetupTimeout
 	}

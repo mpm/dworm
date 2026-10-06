@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test dworm up --daemon lifecycle: single instance, state file, status --json,
+# Test dworm up --foreground lifecycle: single instance, state file, status --json,
 # signal and bridge-failure exit codes, plain log line endings
 
 set -e
@@ -16,14 +16,9 @@ setup_cleanup
 LOG_DIR=$(mktemp -d)
 trap 'rm -rf "$LOG_DIR"; _cleanup' EXIT
 
-RUNTIME_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/dworm}"
-RUNTIME_DIR="${RUNTIME_DIR:-${TMPDIR:-/tmp}/dworm-$(id -u)}"
-HASH=$(printf '%s' "$DEVCONTAINER_PATH" | sha256sum | cut -c1-12)
-STATE_FILE="$RUNTIME_DIR/$HASH.json"
-
 start_daemon() {
     cd "$DEVCONTAINER_PATH"
-    "$DWORM" up --daemon 2>"$1" &
+    "$DWORM" up --foreground 2>"$1" &
     DWORM_PID=$!
     cd - >/dev/null
     local i
@@ -40,15 +35,6 @@ start_daemon() {
     done
     log_fail "Timed out waiting for the state file"
     return 1
-}
-
-status_field() {
-    (cd "$DEVCONTAINER_PATH" && "$DWORM" status --json 2>/dev/null) |
-        python3 -c 'import json, sys
-value = json.load(sys.stdin)
-for key in sys.argv[1].split("."):
-    value = value[key] if value is not None else None
-print(json.dumps(value))' "$1"
 }
 
 wait_exit() {
@@ -84,7 +70,7 @@ done
 
 log_info "Checking that a second dworm up fails fast..."
 status=0
-(cd "$DEVCONTAINER_PATH" && timeout 20 "$DWORM" up --daemon 2>"$LOG_DIR/second.log") || status=$?
+(cd "$DEVCONTAINER_PATH" && timeout 20 "$DWORM" up --foreground 2>"$LOG_DIR/second.log") || status=$?
 if [[ "$status" -ne 3 ]]; then
     log_fail "Second dworm up exited with $status, want 3"
     cat "$LOG_DIR/second.log"

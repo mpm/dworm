@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// ErrAlreadyRunning is returned when another `dworm up` holds the workspace lock.
-var ErrAlreadyRunning = errors.New("dworm up is already running for this workspace")
+// ErrAlreadyRunning is returned when another instance holds the workspace lock.
+var ErrAlreadyRunning = errors.New("a dworm instance is already running for this workspace")
 
 // InstancePaths are the per-workspace runtime files of a `dworm up` process.
 // They are named after a short hash of the absolute workspace path, which keeps
@@ -24,6 +24,7 @@ type InstancePaths struct {
 	Lock   string
 	State  string
 	Socket string
+	Log    string // output of a detached instance
 }
 
 // RuntimeDir returns dworm's private runtime directory:
@@ -45,6 +46,7 @@ func InstancePathsFor(workspacePath string) InstancePaths {
 		Lock:   filepath.Join(dir, name+".lock"),
 		State:  filepath.Join(dir, name+".json"),
 		Socket: filepath.Join(dir, name+".sock"),
+		Log:    filepath.Join(dir, name+".log"),
 	}
 }
 
@@ -136,7 +138,8 @@ type StatePort struct {
 	LocalPort int    `json:"local_port"`
 }
 
-// InstanceState is the state file written by a running `dworm up`.
+// InstanceState is the state of a running instance. The instance writes it
+// to the state file and returns it for the socket op "status".
 type InstanceState struct {
 	PID               int         `json:"pid"`
 	WorkspacePath     string      `json:"workspace_path"`
@@ -148,6 +151,15 @@ type InstanceState struct {
 	EndpointConnected bool        `json:"endpoint_connected"`
 	Ports             []StatePort `json:"ports"`
 	ExecSocket        string      `json:"exec_socket,omitempty"`
+	State             string      `json:"state,omitempty"`
+	Reason            string      `json:"reason,omitempty"`
+	Mode              string      `json:"mode,omitempty"`
+	Reconnects        int         `json:"reconnects"`
+	Clients           int         `json:"clients"`
+	LogPath           string      `json:"log_path,omitempty"`
+	DwormVersion      string      `json:"dworm_version,omitempty"`
+	// EnvHash identifies the CLI -e values the instance was started with.
+	EnvHash string `json:"env_hash,omitempty"`
 }
 
 // StateFile serializes updates to an instance's state file.
@@ -177,6 +189,15 @@ func (s *StateFile) Update(change func(*InstanceState)) error {
 		return err
 	}
 	return writeFileAtomic(s.path, append(data, '\n'))
+}
+
+// Snapshot returns a copy of the current state.
+func (s *StateFile) Snapshot() InstanceState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.state
+	state.Ports = append([]StatePort{}, s.state.Ports...)
+	return state
 }
 
 // ReadInstanceState reads a state file.

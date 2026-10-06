@@ -24,7 +24,7 @@ export GIT_CONFIG_COUNT=2
 export GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=""
 export GIT_CONFIG_KEY_1=credential.helper
 export GIT_CONFIG_VALUE_1='!f() { printf "username=fixture\npassword=fixture-secret\n"; }; f'
-(cd "$DEVCONTAINER_PATH" && "$DWORM" up --daemon) > "$DEVCONTAINER_PATH/dworm.log" 2>&1 &
+(cd "$DEVCONTAINER_PATH" && "$DWORM" up --foreground) > "$DEVCONTAINER_PATH/dworm.log" 2>&1 &
 DWORM_PID=$!
 for ((i=0; i<60; i++)); do
     container_id=$(docker ps -q --filter "label=devcontainer.local_folder=$DEVCONTAINER_PATH")

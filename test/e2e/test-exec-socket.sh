@@ -46,7 +46,7 @@ while True:
 EOF
 
 DAEMON_LOG="$WORK_DIR/daemon.log"
-(cd "$DEVCONTAINER_PATH" && exec "$DWORM" up --daemon 2>"$DAEMON_LOG") &
+(cd "$DEVCONTAINER_PATH" && exec "$DWORM" up --foreground 2>"$DAEMON_LOG") &
 DWORM_PID=$!
 
 SOCKET=""

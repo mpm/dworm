@@ -12,8 +12,10 @@ source "$SCRIPT_DIR/lib/skip.sh"
 require_docker
 setup_cleanup
 
+EXEC_FLAGS=()
+
 dworm_exec() {
-    (cd "$DEVCONTAINER_PATH" && "$DWORM" exec "$@")
+    (cd "$DEVCONTAINER_PATH" && "$DWORM" exec "${EXEC_FLAGS[@]}" "$@")
 }
 
 check_exec() {
@@ -55,7 +57,7 @@ check_exec() {
     fi
 
     log_info "[$label] Checking stdin EOF reaches the child..."
-    out=$(printf 'x' | timeout 20 bash -c "cd '$DEVCONTAINER_PATH' && '$DWORM' exec -- sh -c 'cat >/dev/null; echo eof'")
+    out=$(printf 'x' | timeout 20 bash -c "cd '$DEVCONTAINER_PATH' && '$DWORM' exec ${EXEC_FLAGS[*]} -- sh -c 'cat >/dev/null; echo eof'")
     if [[ "$out" != "eof" ]]; then
         log_fail "[$label] child did not observe stdin EOF: $out"
         return 1
@@ -63,12 +65,10 @@ check_exec() {
 }
 
 start_dworm
-check_exec "with dworm up"
+check_exec "via the instance"
 
-# Stop the bridge but keep the container: exec uses plain docker exec.
-kill "$DWORM_PID" 2>/dev/null || true
-wait "$DWORM_PID" 2>/dev/null || true
-DWORM_PID=
-check_exec "without dworm up"
+# --no-bridge uses plain docker exec.
+EXEC_FLAGS=(--no-bridge)
+check_exec "--no-bridge"
 
 log_pass "dworm exec passes stdio and exit codes through"

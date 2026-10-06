@@ -35,12 +35,12 @@ wait_for_container() {
     return 1
 }
 
-# Start dworm in background
+# Start a foreground dworm instance in the background
 start_dworm() {
     local extra_args="${1:-}"
     log_info "Starting dworm..."
     # shellcheck disable=SC2086
-    (cd "$DEVCONTAINER_PATH" && "$DWORM" up --daemon $extra_args) &
+    (cd "$DEVCONTAINER_PATH" && exec "$DWORM" up --foreground $extra_args) &
     DWORM_PID=$!
 
     # Wait for container to be ready
@@ -54,7 +54,7 @@ start_dworm() {
     log_info "dworm started (PID: $DWORM_PID)"
 }
 
-# Stop dworm and container
+# Stop dworm (any instance) and container
 stop_dworm() {
     log_info "Stopping dworm..."
     if [[ -n "${DWORM_PID:-}" ]]; then
@@ -62,6 +62,23 @@ stop_dworm() {
         wait "$DWORM_PID" 2>/dev/null || true
     fi
     (cd "$DEVCONTAINER_PATH" && "$DWORM" down) 2>/dev/null || true
+}
+
+# Runtime files of the test workspace's instance
+RUNTIME_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/dworm}"
+RUNTIME_DIR="${RUNTIME_DIR:-${TMPDIR:-/tmp}/dworm-$(id -u)}"
+INSTANCE_HASH=$(printf '%s' "$DEVCONTAINER_PATH" | sha256sum | cut -c1-12)
+STATE_FILE="$RUNTIME_DIR/$INSTANCE_HASH.json"
+INSTANCE_LOG="$RUNTIME_DIR/$INSTANCE_HASH.log"
+
+# Print a field of `dworm status --json` (dotted path) as JSON
+status_field() {
+    (cd "$DEVCONTAINER_PATH" && "$DWORM" status --json 2>/dev/null) |
+        python3 -c 'import json, sys
+value = json.load(sys.stdin)
+for key in sys.argv[1].split("."):
+    value = value.get(key) if isinstance(value, dict) else None
+print(json.dumps(value))' "$1"
 }
 
 # Cleanup on exit

@@ -19,31 +19,85 @@ import (
 	"github.com/mpm/dworm/internal/protocol"
 )
 
-// ExecServer serves the local exec socket of a running `dworm up`. Each
-// connection runs one process in the container over a bridge exec stream.
-//
-// A client sends one JSON line (protocol.ExecRequest) and receives one JSON
-// line (protocol.ExecReply). In raw mode the connection then carries stdin
-// (client half-close = stdin EOF) and stdout; stderr goes to the log. In
-// framed mode it carries protocol frames. A client that disconnects before
-// the process exits gets its process group terminated.
-type ExecServer struct {
-	path            string
-	listener        *net.UnixListener
-	open            func() (net.Conn, error)
-	workspaceFolder string
-	logger          *log.Logger
-	headerTimeout   time.Duration
+// Socket ops. A request without "op" is an exec request (v0.7.0 clients).
+const (
+	OpExec   = "exec"
+	OpEvents = "events"
+	OpStatus = "status"
+	OpStop   = "stop"
+)
 
-	mu       sync.Mutex
-	closed   bool
-	sessions map[io.Closer]struct{}
-	wg       sync.WaitGroup
+// ReplyCodeNotReady is the reply code for exec requests before the instance
+// is ready.
+const ReplyCodeNotReady = "not_ready"
+
+// ControlRequest is the first line a client sends on the instance socket.
+type ControlRequest struct {
+	protocol.ExecRequest
+	Op      string `json:"op,omitempty"`
+	History int    `json:"history,omitempty"` // events: log events in the snapshot
+	Follow  *bool  `json:"follow,omitempty"`  // events: false = snapshot only
 }
 
-// NewExecServer listens on path (mode 0600) and serves until Close. open opens
-// a new bridge stream; workspaceFolder is the default working directory.
-func NewExecServer(path string, open func() (net.Conn, error), workspaceFolder string, logger *log.Logger) (*ExecServer, error) {
+// ControlReply is the first line the instance sends back.
+type ControlReply struct {
+	protocol.ExecReply
+	Status *InstanceState `json:"status,omitempty"` // op status
+}
+
+// ExecServerConfig configures an ExecServer. Only Open is required.
+type ExecServerConfig struct {
+	// Open opens a new bridge stream.
+	Open func() (net.Conn, error)
+	// WorkspaceFolder returns the default working directory.
+	WorkspaceFolder func() string
+	Logger          *log.Logger
+	// Ready reports whether exec requests can be served; before that they
+	// are rejected with ReplyCodeNotReady.
+	Ready func() bool
+	// Status returns the live instance state (op status).
+	Status func() InstanceState
+	// Events backs op events.
+	Events *EventBus
+	// Stop asks the instance to shut down (op stop).
+	Stop func()
+}
+
+type sessionKind int
+
+const (
+	sessionExec    sessionKind = iota // exec client connection or bridge stream
+	sessionEvents                     // event subscriber
+	sessionControl                    // other ops
+)
+
+// ExecServer serves the local socket of a running instance. Each connection
+// carries one op; an exec connection runs one process in the container over a
+// bridge exec stream.
+//
+// A client sends one JSON line (ControlRequest) and receives one JSON line
+// (ControlReply). In raw mode the connection then carries stdin (client
+// half-close = stdin EOF) and stdout; stderr goes to the log. In framed mode
+// it carries protocol frames. A client that disconnects before the process
+// exits gets its process group terminated.
+type ExecServer struct {
+	path          string
+	listener      *net.UnixListener
+	cfg           ExecServerConfig
+	logger        *log.Logger
+	headerTimeout time.Duration
+	done          chan struct{}
+
+	mu          sync.Mutex
+	closed      bool
+	execsClosed bool
+	clients     int
+	sessions    map[io.Closer]sessionKind
+	wg          sync.WaitGroup
+}
+
+// NewExecServer listens on path (mode 0600) and serves until Close.
+func NewExecServer(path string, cfg ExecServerConfig) (*ExecServer, error) {
 	// A crashed instance may have left its socket behind; the caller holds the
 	// workspace lock, so nothing else is using it.
 	os.Remove(path)
@@ -55,14 +109,18 @@ func NewExecServer(path string, open func() (net.Conn, error), workspaceFolder s
 		listener.Close()
 		return nil, fmt.Errorf("secure exec socket: %w", err)
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
 	s := &ExecServer{
-		path:            path,
-		listener:        listener,
-		open:            open,
-		workspaceFolder: workspaceFolder,
-		logger:          logger,
-		headerTimeout:   30 * time.Second,
-		sessions:        make(map[io.Closer]struct{}),
+		path:          path,
+		listener:      listener,
+		cfg:           cfg,
+		logger:        logger,
+		headerTimeout: 30 * time.Second,
+		done:          make(chan struct{}),
+		sessions:      make(map[io.Closer]sessionKind),
 	}
 	go s.serve()
 	return s, nil
@@ -71,8 +129,44 @@ func NewExecServer(path string, open func() (net.Conn, error), workspaceFolder s
 // Path returns the socket path.
 func (s *ExecServer) Path() string { return s.path }
 
+// Clients returns the number of attached clients: running exec sessions and
+// event subscriptions.
+func (s *ExecServer) Clients() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clients
+}
+
+func (s *ExecServer) attach(delta int) {
+	s.mu.Lock()
+	s.clients += delta
+	attached := s.clients
+	s.mu.Unlock()
+	if s.cfg.Events != nil {
+		s.cfg.Events.Publish(Event{Type: EventClient, Attached: attached})
+	}
+}
+
+// CloseExecs rejects new exec requests and ends all exec sessions, which
+// terminates their processes. Other ops keep working until Close.
+func (s *ExecServer) CloseExecs() {
+	s.mu.Lock()
+	s.execsClosed = true
+	var sessions []io.Closer
+	for c, kind := range s.sessions {
+		if kind == sessionExec {
+			sessions = append(sessions, c)
+		}
+	}
+	s.mu.Unlock()
+	for _, c := range sessions {
+		c.Close()
+	}
+}
+
 // Close stops accepting connections, ends all sessions (terminating their
-// processes), and removes the socket.
+// processes), and removes the socket. Event subscribers get up to two
+// seconds to receive their remaining events; close the event bus first.
 func (s *ExecServer) Close() {
 	s.mu.Lock()
 	if s.closed {
@@ -80,28 +174,51 @@ func (s *ExecServer) Close() {
 		return
 	}
 	s.closed = true
+	s.mu.Unlock()
+
+	s.listener.Close()
+	os.Remove(s.path)
+	s.CloseExecs()
+	close(s.done)
+
+	drained := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		return
+	case <-time.After(2 * time.Second):
+	}
+	s.mu.Lock()
 	sessions := make([]io.Closer, 0, len(s.sessions))
 	for c := range s.sessions {
 		sessions = append(sessions, c)
 	}
 	s.mu.Unlock()
-
-	s.listener.Close()
-	os.Remove(s.path)
 	for _, c := range sessions {
 		c.Close()
 	}
-	s.wg.Wait()
+	<-drained
 }
 
-func (s *ExecServer) track(c io.Closer) bool {
+func (s *ExecServer) track(c io.Closer, kind sessionKind) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || (kind == sessionExec && s.execsClosed) {
 		return false
 	}
-	s.sessions[c] = struct{}{}
+	s.sessions[c] = kind
 	return true
+}
+
+func (s *ExecServer) retrack(c io.Closer, kind sessionKind) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[c]; ok {
+		s.sessions[c] = kind
+	}
 }
 
 func (s *ExecServer) untrack(c io.Closer) {
@@ -124,7 +241,7 @@ func (s *ExecServer) serve() {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		if !s.track(conn) {
+		if !s.track(conn, sessionControl) {
 			conn.Close()
 			return
 		}
@@ -138,7 +255,7 @@ func (s *ExecServer) serve() {
 	}
 }
 
-func writeReplyLine(w io.Writer, reply protocol.ExecReply) error {
+func writeReplyLine(w io.Writer, reply interface{}) error {
 	data, err := json.Marshal(reply)
 	if err != nil {
 		return err
@@ -152,7 +269,7 @@ func (s *ExecServer) reject(conn net.Conn, format string, args ...interface{}) {
 }
 
 // readRequest reads and validates the client's request line.
-func readRequest(reader *bufio.Reader) (*protocol.ExecRequest, error) {
+func readRequest(reader *bufio.Reader) (*ControlRequest, error) {
 	line, err := reader.ReadSlice('\n')
 	if errors.Is(err, bufio.ErrBufferFull) {
 		return nil, fmt.Errorf("request header exceeds %d bytes", protocol.MaxExecHeaderSize)
@@ -160,7 +277,7 @@ func readRequest(reader *bufio.Reader) (*protocol.ExecRequest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read request: %w", err)
 	}
-	var req protocol.ExecRequest
+	var req ControlRequest
 	decoder := json.NewDecoder(bytes.NewReader(line))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
@@ -168,6 +285,16 @@ func readRequest(reader *bufio.Reader) (*protocol.ExecRequest, error) {
 	}
 	if req.Version != protocol.ExecRequestVersion {
 		return nil, fmt.Errorf("unsupported request version %d (want %d)", req.Version, protocol.ExecRequestVersion)
+	}
+	switch req.Op {
+	case "":
+		req.Op = OpExec
+	case OpExec, OpEvents, OpStatus, OpStop:
+	default:
+		return nil, fmt.Errorf("unknown op %q", req.Op)
+	}
+	if req.Op != OpExec {
+		return &req, nil
 	}
 	if len(req.Argv) == 0 {
 		return nil, errors.New("argv must not be empty")
@@ -206,19 +333,96 @@ func (s *ExecServer) handle(conn *net.UnixConn) {
 		return
 	}
 	conn.SetReadDeadline(time.Time{})
-	if req.Cwd == "" {
-		req.Cwd = s.workspaceFolder
+	switch req.Op {
+	case OpEvents:
+		s.handleEvents(conn, req)
+	case OpStatus:
+		if s.cfg.Status == nil {
+			s.reject(conn, "op status is not supported")
+			return
+		}
+		status := s.cfg.Status()
+		status.Clients = s.Clients()
+		writeReplyLine(conn, ControlReply{ExecReply: protocol.ExecReply{OK: true}, Status: &status})
+	case OpStop:
+		if s.cfg.Stop == nil {
+			s.reject(conn, "op stop is not supported")
+			return
+		}
+		writeReplyLine(conn, protocol.ExecReply{OK: true})
+		s.cfg.Stop()
+		// The connection closes when the instance has shut down.
+		<-s.done
+	default:
+		s.retrack(conn, sessionExec)
+		s.handleExec(conn, reader, &req.ExecRequest)
+	}
+}
+
+// handleEvents streams events as JSON lines: first the snapshot, then live
+// events unless follow is false. Closing the connection unsubscribes.
+func (s *ExecServer) handleEvents(conn *net.UnixConn, req *ControlRequest) {
+	if s.cfg.Events == nil {
+		s.reject(conn, "op events is not supported")
+		return
+	}
+	if req.History < 0 || req.History > EventHistorySize {
+		s.reject(conn, "history must be between 0 and %d", EventHistorySize)
+		return
+	}
+	sub := s.cfg.Events.Subscribe(req.History)
+	defer sub.Close()
+	s.retrack(conn, sessionEvents)
+	if writeReplyLine(conn, protocol.ExecReply{OK: true}) != nil {
+		return
+	}
+	writer := bufio.NewWriter(conn)
+	writeEvent := func(e Event) {
+		if data, err := json.Marshal(e); err == nil {
+			writer.Write(append(data, '\n'))
+		}
+	}
+	if req.Follow != nil && !*req.Follow {
+		for i := 0; i < sub.Snapshot; i++ {
+			writeEvent(<-sub.Events())
+		}
+		writer.Flush()
+		return
+	}
+	s.attach(1)
+	defer s.attach(-1)
+	go func() {
+		// Any input or EOF from the client ends the subscription.
+		conn.Read(make([]byte, 1))
+		sub.Close()
+	}()
+	for e := range sub.Events() {
+		writeEvent(e)
+		if len(sub.Events()) == 0 && writer.Flush() != nil {
+			return
+		}
+	}
+	writer.Flush()
+}
+
+func (s *ExecServer) handleExec(conn *net.UnixConn, reader *bufio.Reader, req *protocol.ExecRequest) {
+	if s.cfg.Ready != nil && !s.cfg.Ready() {
+		writeReplyLine(conn, protocol.ExecReply{Error: "not ready", Code: ReplyCodeNotReady})
+		return
+	}
+	if req.Cwd == "" && s.cfg.WorkspaceFolder != nil {
+		req.Cwd = s.cfg.WorkspaceFolder()
 	}
 	req.ID = newExecID()
 
-	stream, err := s.open()
+	stream, err := s.cfg.Open()
 	if err != nil {
 		s.reject(conn, "open bridge stream: %v", err)
 		return
 	}
-	if !s.track(stream) {
+	if !s.track(stream, sessionExec) {
 		stream.Close()
-		s.reject(conn, "dworm up is shutting down")
+		s.reject(conn, "dworm instance is shutting down")
 		return
 	}
 	defer s.untrack(stream)
@@ -250,6 +454,8 @@ func (s *ExecServer) handle(conn *net.UnixConn) {
 		return
 	}
 	s.logger.Printf("[exec %s] Started %q (%s mode)", req.ID, req.Argv[0], mode)
+	s.attach(1)
+	defer s.attach(-1)
 
 	var exit *protocol.ExecExit
 	if mode == protocol.ExecModeRaw {

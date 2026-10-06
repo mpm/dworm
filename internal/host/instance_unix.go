@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 var errLocked = errors.New("lock is held by another process")
@@ -29,4 +31,18 @@ func lockFile(file *os.File, exclusive bool) error {
 		}
 		return err
 	}
+}
+
+// redirectStdio points stdout and stderr at file.
+func redirectStdio(file *os.File) error {
+	if err := unix.Dup2(int(file.Fd()), 1); err != nil {
+		return err
+	}
+	return unix.Dup2(int(file.Fd()), 2)
+}
+
+// detachedAttrs starts a process in a new session, without a controlling
+// terminal.
+func detachedAttrs() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setsid: true}
 }

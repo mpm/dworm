@@ -43,11 +43,11 @@ EOF
 printf 'TOKEN=first\nPIN=generated\nREMOVED=present\n' > "$DEVCONTAINER_PATH/generated.env"
 
 log_info "Testing project environment and periodic refresh..."
-(cd "$DEVCONTAINER_PATH" && "$DWORM" up --daemon -e PIN=cli) > "$DEVCONTAINER_PATH/dworm.log" 2>&1 &
+(cd "$DEVCONTAINER_PATH" && "$DWORM" up --foreground -e PIN=cli) > "$DEVCONTAINER_PATH/dworm.log" 2>&1 &
 DWORM_PID=$!
 
 read_values() {
-    (cd "$DEVCONTAINER_PATH" && "$DWORM" exec -- sh -c 'printf "%s|%s|%s|%s" "$TOKEN" "$STATIC" "$PIN" "${REMOVED-unset}"') 2>/dev/null
+    (cd "$DEVCONTAINER_PATH" && "$DWORM" exec "$@" -- sh -c 'printf "%s|%s|%s|%s" "$TOKEN" "$STATIC" "$PIN" "${REMOVED-unset}"') 2>/dev/null
 }
 wait_values() {
     local expected="$1" result=""
@@ -85,9 +85,10 @@ override=$(cd "$DEVCONTAINER_PATH" && "$DWORM" exec -e TOKEN=one-command -- prin
 test "$override" = one-command
 wait_values 'static-fallback|from-file|cli|unset'
 
-# A stopped host bridge leaves a usable last snapshot.
+# A stopped host bridge leaves a usable last snapshot (plain docker exec, so
+# no new instance starts).
 kill "$DWORM_PID"
 wait "$DWORM_PID"
 DWORM_PID=""
-test "$(read_values)" = 'static-fallback|from-file|cli|unset'
+test "$(read_values --no-bridge)" = 'static-fallback|from-file|cli|unset'
 log_pass "Host startup, dotenv, CLI precedence, refresh, removals, and failure retention work"
