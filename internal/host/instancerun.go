@@ -59,6 +59,10 @@ type instanceDeps struct {
 	containerRunning func(containerID string) bool
 	forwarding       func(*log.Logger) forwardingConfig
 	initTimeout      time.Duration
+	// Reconnect backoff while the container is down, and how long to keep
+	// trying before the instance stops.
+	retryMin, retryMax time.Duration
+	reconnectWindow    time.Duration
 }
 
 func defaultInstanceDeps() instanceDeps {
@@ -66,6 +70,7 @@ func defaultInstanceDeps() instanceDeps {
 		devcontainerUp: DevcontainerUp,
 		startEndpoint: func(ctx context.Context, containerID string, hostLog, endpointStderr io.Writer) (endpointConn, error) {
 			e := NewEndpointManager(containerID, hostLog)
+			e.logger = log.New(hostLog, "[host] ", 0) // the instance log adds timestamps
 			e.stderrWriter = endpointStderr
 			if err := e.InjectAndStart(); err != nil {
 				e.Close()
@@ -76,6 +81,9 @@ func defaultInstanceDeps() instanceDeps {
 		containerRunning: IsContainerRunning,
 		forwarding:       detectForwarding,
 		initTimeout:      30 * time.Second,
+		retryMin:         time.Second,
+		retryMax:         30 * time.Second,
+		reconnectWindow:  2 * time.Minute,
 	}
 }
 
@@ -289,18 +297,83 @@ func (i *Instance) serve(ctx context.Context) error {
 		}, func(err error) { i.logger.Printf("Environment refresh failed (keeping previous values): %v", err) })
 	})
 
-	select {
-	case <-ctx.Done():
-		return nil
-	case <-session.done:
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-session.done:
+		}
 		// systemd signals the whole cgroup, so the docker exec carrying the
 		// bridge may die just before our own SIGTERM is delivered. A stop that
 		// arrives with the failure is still a clean shutdown.
 		if stopRequested(ctx, 500*time.Millisecond) {
 			return nil
 		}
-		i.update(func(s *InstanceState) { s.EndpointConnected = false })
-		return fmt.Errorf("endpoint transport failed: %w", session.err)
+		i.logger.Printf("Bridge lost: %v", session.err)
+		if old := i.setBridge(nil); old != nil {
+			old.close()
+		}
+		i.update(func(s *InstanceState) { s.Reconnects++ })
+		i.setState(StateReconnecting, "bridge_lost")
+
+		session, err = i.reconnect(ctx, info.ContainerID)
+		if ctx.Err() != nil {
+			if session != nil {
+				session.close()
+			}
+			return nil
+		}
+		if errors.Is(err, errContainerStopped) {
+			i.logger.Printf("Container stayed down for %v; stopping", i.deps.reconnectWindow)
+			i.requestStop(ReasonContainerStopped)
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		i.setBridge(session)
+		i.setState(StateReady, "")
+	}
+}
+
+var errContainerStopped = errors.New("container is not running")
+
+// reconnect re-injects the endpoint until it is connected. While the
+// container is down it retries with backoff for the reconnect window and
+// then returns errContainerStopped.
+func (i *Instance) reconnect(ctx context.Context, containerID string) (*bridgeSession, error) {
+	deadline := time.Now().Add(i.deps.reconnectWindow)
+	delay := i.deps.retryMin
+	for {
+		var err error
+		if i.deps.containerRunning(containerID) {
+			var session *bridgeSession
+			if session, err = i.connect(containerID); err == nil {
+				i.logger.Printf("Bridge reconnected")
+				return session, nil
+			}
+			i.logger.Printf("Reconnect failed: %v", err)
+		} else {
+			err = errContainerStopped
+		}
+		if time.Now().Add(delay).After(deadline) {
+			if errors.Is(err, errContainerStopped) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("reconnect to the endpoint: %w", err)
+		}
+		if errors.Is(err, errContainerStopped) {
+			i.logger.Printf("Container is not running; retrying in %v", delay)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+		if delay > i.deps.retryMax {
+			delay = i.deps.retryMax
+		}
 	}
 }
 

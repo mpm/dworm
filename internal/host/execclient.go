@@ -107,6 +107,9 @@ func ExecViaSocket(socketPath string, req protocol.ExecRequest, stdin io.Reader,
 			stderr.Write(payload)
 		case protocol.FrameExit:
 			exit := parseExit(payload)
+			if exit.Error != "" {
+				fmt.Fprintf(stderr, "dworm: %s\n", exit.Error)
+			}
 			if exit.Code != 0 {
 				return &ExitError{Code: exit.Code}
 			}

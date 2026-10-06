@@ -101,6 +101,7 @@ func (b *syncBuffer) String() string {
 }
 
 type execServerFixture struct {
+	h        *testutil.TestHarness
 	server   *ExecServer
 	endpoint *fakeExecEndpoint
 	logs     *syncBuffer
@@ -128,7 +129,7 @@ func newExecServerFixture(t *testing.T, endpoint *fakeExecEndpoint) *execServerF
 		server.Close()
 		h.Close()
 	})
-	return &execServerFixture{server: server, endpoint: endpoint, logs: logs}
+	return &execServerFixture{h: h, server: server, endpoint: endpoint, logs: logs}
 }
 
 func (f *execServerFixture) dial(t *testing.T, header string) (*net.UnixConn, *bufio.Reader, protocol.ExecReply) {
@@ -267,6 +268,34 @@ func TestExecFramedDisconnectKills(t *testing.T) {
 	expectNotKilled(t, f.endpoint, 300*time.Millisecond)
 	conn.Close()
 	expectKilled(t, f.endpoint, 2*time.Second)
+}
+
+func TestExecFramedBridgeLost(t *testing.T) {
+	f := newExecServerFixture(t, &fakeExecEndpoint{ignoreEOF: true})
+	conn, reader, reply := f.dial(t, `{"version":1,"argv":["sleep"],"mode":"framed"}`)
+	if !reply.OK {
+		t.Fatalf("reply = %+v", reply)
+	}
+	protocol.ReadFrame(reader) // stderr "err"
+	f.h.EndpointMux.Close()
+	frameType, payload, err := protocol.ReadFrame(reader)
+	if err != nil || frameType != protocol.FrameExit || string(payload) != `{"code":255,"error":"bridge lost"}` {
+		t.Fatalf("frame = %d %s, %v; want the bridge-lost exit frame", frameType, payload, err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := protocol.ReadFrame(reader); err != io.EOF {
+		t.Fatalf("after exit frame: %v, want EOF", err)
+	}
+}
+
+func TestExecRawBridgeLostClosesConnection(t *testing.T) {
+	f := newExecServerFixture(t, &fakeExecEndpoint{ignoreEOF: true})
+	conn, reader, _ := f.dial(t, `{"version":1,"argv":["sleep"]}`)
+	f.h.EndpointMux.Close()
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("raw connection after bridge loss: %v, want EOF", err)
+	}
 }
 
 func TestExecRejectsInvalidRequests(t *testing.T) {

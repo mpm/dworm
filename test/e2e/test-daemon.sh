@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test dworm up --foreground lifecycle: single instance, state file, status --json,
-# signal and bridge-failure exit codes, plain log line endings
+# SIGTERM exit code, reconnect after docker restart, plain log line endings
 
 set -e
 
@@ -109,15 +109,27 @@ if grep -q $'\r' "$LOG_DIR/first.log"; then
     exit 1
 fi
 
-log_info "Checking that a broken bridge exits non-zero..."
+log_info "Checking that the instance reconnects after docker restart..."
 start_daemon "$LOG_DIR/third.log"
 docker restart "$CONTAINER_ID" >/dev/null
-status=0
-wait_exit "$DWORM_PID" 60 || status=$?
-DWORM_PID=
-if [[ "$status" -eq 0 || "$status" -eq 124 ]]; then
-    log_fail "dworm up exit status after container restart = $status, want non-zero exit"
+for ((i = 0; i < 60; i++)); do
+    if [[ "$(state_field reconnects)" == "1" && "$(state_field state)" == '"ready"' ]]; then
+        break
+    fi
+    if ! kill -0 "$DWORM_PID" 2>/dev/null; then
+        log_fail "dworm up exited after the container restart"
+        cat "$LOG_DIR/third.log"
+        exit 1
+    fi
+    sleep 1
+done
+if [[ "$(state_field pid)" != "$DWORM_PID" || "$(state_field state)" != '"ready"' ]]; then
+    log_fail "instance did not reconnect: pid $(state_field pid) (want $DWORM_PID), state $(state_field state), reconnects $(state_field reconnects)"
     cat "$LOG_DIR/third.log"
+    exit 1
+fi
+if ! (cd "$DEVCONTAINER_PATH" && "$DWORM" exec -- true </dev/null); then
+    log_fail "dworm exec failed after the reconnect"
     exit 1
 fi
 

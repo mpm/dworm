@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -401,5 +403,140 @@ func TestSocketOps(t *testing.T) {
 	}
 	if strings.Join(types, ",") != "state,ports" {
 		t.Fatalf("snapshot without follow = %v", types)
+	}
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+func TestInstanceReconnectsAfterBridgeLoss(t *testing.T) {
+	var running atomic.Bool
+	running.Store(true)
+	port := freePort(t)
+	f := startInstance(t, func(d *instanceDeps) {
+		d.containerRunning = func(string) bool { return running.Load() }
+		d.retryMin, d.retryMax, d.reconnectWindow = 20*time.Millisecond, 50*time.Millisecond, time.Minute
+	})
+	f.bridge.ports = []protocol.PortInfo{{Port: port, Address: "127.0.0.1"}}
+	f.bridge.exec.ignoreEOF = true
+	// The first bridge came up before the ports were set; reconnecting once
+	// makes the endpoint report them.
+	waitState(t, f.paths.Socket, StateReady)
+	f.bridge.breakBridge()
+	waitFor(t, "second connect", func() bool { return f.bridge.connects() == 2 })
+	state := waitState(t, f.paths.Socket, StateReady)
+	waitFor(t, "forwarded port", func() bool {
+		s, _ := QueryInstance(f.paths.Socket)
+		return s != nil && len(s.Ports) == 1 && s.Ports[0].Port == port
+	})
+
+	events, err := SubscribeEvents(f.paths.Socket, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+	execDone := make(chan error, 1)
+	var stderr syncBuffer
+	go func() {
+		execDone <- ExecViaSocket(f.paths.Socket, protocol.ExecRequest{Argv: []string{"sleep"}}, strings.NewReader(""), io.Discard, &stderr)
+	}()
+	waitFor(t, "exec running", func() bool {
+		f.bridge.exec.mu.Lock()
+		defer f.bridge.exec.mu.Unlock()
+		return len(f.bridge.exec.requests) == 1
+	})
+
+	running.Store(false) // the container restarts
+	f.bridge.breakBridge()
+	select {
+	case err := <-execDone:
+		var exitErr *ExitError
+		if !errors.As(err, &exitErr) || exitErr.Code != 255 || !strings.Contains(stderr.String(), "bridge lost") {
+			t.Fatalf("exec after bridge loss = %v, stderr %q; want 255 and bridge lost", err, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("exec client was not told about the lost bridge")
+	}
+	waitState(t, f.paths.Socket, StateReconnecting)
+
+	// Listeners stay open, new tunnel connections are refused.
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		t.Fatalf("listener closed during reconnect: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if n, err := conn.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("tunnel during reconnect: read %d, %v; want EOF", n, err)
+	}
+	conn.Close()
+	err = ExecViaSocket(f.paths.Socket, protocol.ExecRequest{Argv: []string{"true"}}, strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("exec during reconnect = %v, want not ready", err)
+	}
+
+	running.Store(true)
+	state = waitState(t, f.paths.Socket, StateReady)
+	if state.Reconnects != 2 || !state.EndpointConnected || f.bridge.connects() != 3 {
+		t.Fatalf("state after reconnect = %+v, connects %d", state, f.bridge.connects())
+	}
+	var states []string
+	for len(states) < 3 { // snapshot, reconnecting, ready
+		e, err := events.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.Type == EventState {
+			states = append(states, e.State+":"+e.Reason)
+		}
+	}
+	states = states[1:]
+	if strings.Join(states, ",") != "reconnecting:bridge_lost,ready:" {
+		t.Fatalf("state events = %v", states)
+	}
+	f.bridge.exec.ignoreEOF = false
+	var stdout strings.Builder
+	ExecViaSocket(f.paths.Socket, protocol.ExecRequest{Argv: []string{"cat"}}, strings.NewReader("again"), &stdout, io.Discard)
+	if stdout.String() != "again" {
+		t.Fatalf("exec after reconnect: stdout %q", stdout.String())
+	}
+}
+
+func TestInstanceStopsWhenContainerStaysDown(t *testing.T) {
+	var running atomic.Bool
+	running.Store(true)
+	f := startInstance(t, func(d *instanceDeps) {
+		d.containerRunning = func(string) bool { return running.Load() }
+		d.retryMin, d.retryMax, d.reconnectWindow = 20*time.Millisecond, 40*time.Millisecond, 300*time.Millisecond
+	})
+	waitState(t, f.paths.Socket, StateReady)
+	events, err := SubscribeEvents(f.paths.Socket, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+	running.Store(false)
+	f.bridge.breakBridge()
+	if err := f.wait(t); err != nil {
+		t.Fatalf("run = %v, want a clean stop", err)
+	}
+	var last Event
+	for {
+		e, err := events.Next()
+		if err != nil {
+			break
+		}
+		if e.Type == EventState {
+			last = e
+		}
+	}
+	if last.State != StateStopped || last.Reason != ReasonContainerStopped {
+		t.Fatalf("final state = %+v", last)
 	}
 }

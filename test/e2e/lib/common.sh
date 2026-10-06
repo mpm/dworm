@@ -71,6 +71,15 @@ INSTANCE_HASH=$(printf '%s' "$DEVCONTAINER_PATH" | sha256sum | cut -c1-12)
 STATE_FILE="$RUNTIME_DIR/$INSTANCE_HASH.json"
 INSTANCE_LOG="$RUNTIME_DIR/$INSTANCE_HASH.log"
 
+# Print a field of the instance state file as JSON
+state_field() {
+    python3 -c 'import json, sys
+try:
+    print(json.dumps(json.load(open(sys.argv[1])).get(sys.argv[2])))
+except OSError:
+    print("null")' "$STATE_FILE" "$1"
+}
+
 # Print a field of `dworm status --json` (dotted path) as JSON
 status_field() {
     (cd "$DEVCONTAINER_PATH" && "$DWORM" status --json 2>/dev/null) |

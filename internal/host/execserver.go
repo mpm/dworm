@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mpm/dworm/internal/config"
@@ -466,6 +467,8 @@ func (s *ExecServer) handleExec(conn *net.UnixConn, reader *bufio.Reader, req *p
 	switch {
 	case exit == nil:
 		s.logger.Printf("[exec %s] Ended without exit status (caller or bridge disconnected)", req.ID)
+	case exit.Error != "":
+		s.logger.Printf("[exec %s] Ended: %s", req.ID, exit.Error)
 	case exit.Signal != "":
 		s.logger.Printf("[exec %s] Exited on signal %s", req.ID, exit.Signal)
 	default:
@@ -540,8 +543,11 @@ func (s *ExecServer) proxyRaw(conn *net.UnixConn, reader *bufio.Reader, stream n
 }
 
 // proxyFramed forwards frames between a framed client and the bridge stream.
+// When the bridge fails, the client gets a final exit frame with code 255 and
+// error "bridge lost".
 func (s *ExecServer) proxyFramed(conn *net.UnixConn, reader *bufio.Reader, stream net.Conn, id string) *protocol.ExecExit {
 	exited := make(chan struct{})
+	var clientGone atomic.Bool
 	go func() {
 		for {
 			frameType, payload, err := protocol.ReadFrame(reader)
@@ -549,17 +555,19 @@ func (s *ExecServer) proxyFramed(conn *net.UnixConn, reader *bufio.Reader, strea
 				select {
 				case <-exited:
 				default:
+					clientGone.Store(true)
 					stream.Close()
 				}
 				return
 			}
 			switch frameType {
-			case protocol.FrameStdin, protocol.FrameStdinEOF, protocol.FrameSignal:
+			case protocol.FrameStdin, protocol.FrameStdinEOF, protocol.FrameSignal, protocol.FrameResize:
 				if protocol.WriteFrame(stream, frameType, payload) != nil {
 					return
 				}
 			default:
 				s.logger.Printf("[exec %s] Client sent invalid frame type %d", id, frameType)
+				clientGone.Store(true)
 				stream.Close()
 				conn.Close()
 				return
@@ -570,7 +578,13 @@ func (s *ExecServer) proxyFramed(conn *net.UnixConn, reader *bufio.Reader, strea
 	for {
 		frameType, payload, err := protocol.ReadFrame(stream)
 		if err != nil {
-			return nil
+			if clientGone.Load() {
+				return nil
+			}
+			exit := &protocol.ExecExit{Code: 255, Error: protocol.ExecErrorBridgeLost}
+			close(exited)
+			protocol.WriteJSONFrame(conn, protocol.FrameExit, exit)
+			return exit
 		}
 		switch frameType {
 		case protocol.FrameStdout, protocol.FrameStderr, protocol.FrameExit:
@@ -579,6 +593,7 @@ func (s *ExecServer) proxyFramed(conn *net.UnixConn, reader *bufio.Reader, strea
 			}
 			if err := protocol.WriteFrame(conn, frameType, payload); err != nil {
 				if frameType != protocol.FrameExit {
+					clientGone.Store(true)
 					stream.Close()
 					return nil
 				}

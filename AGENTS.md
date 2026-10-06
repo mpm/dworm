@@ -106,7 +106,8 @@ Exec streams (host → endpoint, `exec.go`):
    command can't be started; also used for limits: `MaxConcurrentExecs` = 32)
 3. Then frames `[1 byte type][4 byte BE length][payload]` (max 1MB): `0x00` stdin, `0x01` stdout,
    `0x02` stderr, `0x03` stdin EOF, `0x04` exit (`{"code":N,"signal":"TERM"}`, last frame; signals
-   report code 128+n), `0x05` signal (`{"signal":"TERM"}`, sent to the process group)
+   report code 128+n; the host sends `{"code":255,"error":"bridge lost"}` itself when the bridge
+   fails), `0x05` signal (`{"signal":"TERM"}`, sent to the process group)
 4. A stream closed/reset before the exit frame is a kill request: SIGTERM to the process group,
    SIGKILL after `ExecKillGrace` (5s). The endpoint does the same for all execs when the bridge ends.
 
@@ -210,9 +211,19 @@ endpoint injection + init, tunnels, agent forwarding, socket). Every command is 
   `LOCK_SH|LOCK_NB`; acquisition retries for ~250ms so a concurrent probe cannot make it fail.
 - **Socket first:** right after the lock, before `devcontainer up`. Until `ready`, exec requests get
   `{"ok":false,"error":"not ready","code":"not_ready"}`.
-- States: `starting` (host env, `devcontainer up`) → `connecting` (endpoint) → `ready` → `stopping` →
-  `stopped` (reason `stop_requested`, `signal`) or `failed` (reason = error). Each change is a `state`
-  event and is mirrored in the state file.
+- States: `starting` (host env, `devcontainer up`) → `connecting` (endpoint) → `ready` ⇄
+  `reconnecting` → `stopping` → `stopped` (reason `stop_requested`, `signal`, `container_stopped`) or
+  `failed` (reason = error). Each change is a `state` event and is mirrored in the state file.
+- **Self-healing bridge:** when the control stream fails (endpoint exits, `docker exec` dies, container
+  restarts), the instance does not exit: `reconnecting` (reason `bridge_lost`, `reconnects`++). If the
+  container runs, it re-injects the endpoint and re-sends init (current env, forwarding config); the
+  new endpoint always reports its first port scan, which replaces the old port list. While the
+  container is down it retries with backoff (1s → 30s) for 2 minutes, then stops with reason
+  `container_stopped` (exit 0; a later `ensure` starts everything again). During the reconnect host
+  port listeners stay open but refuse new connections, exec requests get `not_ready`, and running execs
+  are lost: framed clients get a final exit frame `{"code":255,"error":"bridge lost"}`, raw clients get
+  their connection closed. Nothing is queued. Only unrecoverable errors (e.g. `devcontainer up` failed,
+  the endpoint cannot be re-injected into a running container) make the instance exit non-zero.
 - **Detached start** (`ensure.go`): `dworm __instance` with the global flags (`-c`, `-e`, `--bind`),
   cwd = workspace, `Setsid`, stdin `/dev/null`, stdout/stderr appended to `<hash>.log`. After taking the
   lock it opens `RotatingLog` (5 MiB, rotated once to `.log.1`, stdout/stderr dup2'ed to follow).
@@ -234,6 +245,8 @@ endpoint injection + init, tunnels, agent forwarding, socket). Every command is 
   Only trust it while the lock is held; op `status` returns the same structure live.
 - Stopping: op `stop` or SIGINT/SIGTERM → clean shutdown, exit 0, container keeps running. Running
   execs are terminated (process groups, see below). `StopInstance` waits until the stopped PID is gone.
+  A bridge failure that coincides with a stop signal (500ms grace) is treated as the stop, because
+  systemd signals the whole cgroup.
 - Logs: every log line becomes a `log` event (source `host`, `endpoint`, `devcontainer`; level
   inferred from "warning"/"error"/"failed") and is written, timestamped, to the instance output.
   `protocol.NewLogWriter` uses `CRWriter` only when the file is a terminal.
@@ -351,7 +364,9 @@ Test files:
 - `internal/host/agent_test.go` - SSH/GPG/git credential stream routing
 - `internal/host/instance_test.go` - Instance lock exclusivity/probing, state file
 - `internal/host/instancerun_test.go` - Instance with fake container/endpoint deps: socket before ready
-  (`not_ready`), state sequence, stop op, failure, op dispatch and op-less (v0.7.0) requests. Its
+  (`not_ready`), state sequence, stop op, failure, op dispatch and op-less (v0.7.0) requests, reconnect
+  after a simulated bridge break (exit 255 + `bridge lost`, tunnels refused, back to `ready`), stop
+  with `container_stopped`. Its
   `TestMain` turns the test binary into a fake detached instance for `ensure_test.go`
 - `internal/host/ensure_test.go` - Concurrent ensures share one instance, version mismatch, env warning,
   `--no-start`
@@ -385,7 +400,8 @@ E2E scripts in `test/e2e/`:
   (via the instance and with `--no-bridge`)
 - `test-exec-socket.sh` - Raw socket client (python3), `dworm exec` via the socket, no processes left
   after killed callers or `up` shutdown (`pgrep` in the container)
-- `test-daemon.sh` - `up --foreground` single instance (exit 3), state file, `status --json`, SIGTERM exit 0, bridge failure exit ≠ 0
+- `test-daemon.sh` - `up --foreground` single instance (exit 3), state file, `status --json`, SIGTERM exit 0,
+  reconnect after `docker restart` (same PID, `reconnects` 1, exec works)
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
 - `test-git-creds.sh` - Git credential forwarding (conditional)

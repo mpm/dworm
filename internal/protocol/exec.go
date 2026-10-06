@@ -22,6 +22,7 @@ const (
 	FrameStdinEOF byte = 0x03 // client → process: close stdin (empty payload)
 	FrameExit     byte = 0x04 // process → client: ExecExit JSON, last frame
 	FrameSignal   byte = 0x05 // client → process: ExecSignal JSON
+	FrameResize   byte = 0x06 // client → process: ExecResize JSON (TTY mode)
 )
 
 // Exec limits
@@ -61,11 +62,17 @@ type ExecReply struct {
 }
 
 // ExecExit is the payload of FrameExit. A process killed by a signal reports
-// Signal (e.g. "TERM") and Code 128+signal number.
+// Signal (e.g. "TERM") and Code 128+signal number. Error is set when the
+// exit status is unknown, e.g. "bridge lost" (code 255) when the instance
+// lost the endpoint running the process.
 type ExecExit struct {
 	Code   int    `json:"code"`
 	Signal string `json:"signal,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
+
+// ExecErrorBridgeLost is ExecExit.Error for processes lost with the bridge.
+const ExecErrorBridgeLost = "bridge lost"
 
 // ExecSignal is the payload of FrameSignal. Signal is a name without the SIG
 // prefix, e.g. "TERM", "INT", "HUP", "KILL".

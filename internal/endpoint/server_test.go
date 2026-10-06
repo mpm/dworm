@@ -127,6 +127,21 @@ func TestFailedPortUpdateIsRetried(t *testing.T) {
 	}
 }
 
+func TestFirstPortReportIsSentWhenEmpty(t *testing.T) {
+	server := NewServer()
+	server.logger = log.New(io.Discard, "", 0)
+	sends := 0
+	server.sendControl = func(string, interface{}) error {
+		sends++
+		return nil
+	}
+	server.reportPorts(nil)
+	server.reportPorts(nil)
+	if sends != 1 {
+		t.Fatalf("sends = %d, want exactly the first (empty) report", sends)
+	}
+}
+
 func TestPortScanFailurePreservesCurrentSnapshot(t *testing.T) {
 	server := NewServer()
 	server.logger = log.New(io.Discard, "", 0)

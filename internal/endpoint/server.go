@@ -22,6 +22,7 @@ type Server struct {
 	envVars          map[string]string
 	baseEnv          map[string]string
 	portStateMu      sync.RWMutex
+	portsReported    bool // the first scan is always reported, also when empty
 	currentPorts     []protocol.PortInfo
 	portAddresses    map[int]string // port -> best bind address for connecting
 	logger           *log.Logger
@@ -210,8 +211,10 @@ func (s *Server) scanAndReport() {
 }
 
 func (s *Server) reportPorts(ports []protocol.PortInfo) {
-	previousPorts := s.currentPortSnapshot()
-	if !reflect.DeepEqual(ports, previousPorts) {
+	previousPorts, reported := s.currentPortSnapshot(), s.havePortsReported()
+	// The first report replaces whatever a previous endpoint reported to the
+	// host (e.g. after a reconnect), so it is sent even when empty.
+	if !reported || !reflect.DeepEqual(ports, previousPorts) {
 		added, removed := DiffPorts(previousPorts, ports)
 		if len(added) > 0 {
 			s.logger.Printf("New ports detected: %v", added)
@@ -234,6 +237,12 @@ func (s *Server) reportPorts(ports []protocol.PortInfo) {
 	}
 }
 
+func (s *Server) havePortsReported() bool {
+	s.portStateMu.RLock()
+	defer s.portStateMu.RUnlock()
+	return s.portsReported
+}
+
 func (s *Server) currentPortSnapshot() []protocol.PortInfo {
 	s.portStateMu.RLock()
 	defer s.portStateMu.RUnlock()
@@ -253,6 +262,7 @@ func (s *Server) updatePortState(ports []protocol.PortInfo) ([]protocol.PortInfo
 
 	s.portStateMu.Lock()
 	defer s.portStateMu.Unlock()
+	s.portsReported = true
 	if reflect.DeepEqual(ports, s.currentPorts) {
 		return nil, false
 	}
