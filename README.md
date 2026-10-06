@@ -100,6 +100,45 @@ dworm up --config /path/to/devcontainer.json
 dworm up -c .devcontainer/custom.json
 ```
 
+### One `dworm up` per workspace and running under systemd
+
+Only one `dworm up` can run per workspace. A second one exits immediately with
+**exit code 3** and names the running process; use `dworm shell` or `dworm exec`
+alongside it instead. The lock is an `flock` on a file in
+`$XDG_RUNTIME_DIR/dworm/` (or `/tmp/dworm-$UID/`, mode `0700`), so it is released
+automatically if dworm crashes.
+
+`dworm up --daemon` is suitable for a `Type=simple` systemd unit:
+
+- it stays in the foreground until stopped;
+- SIGTERM/SIGINT closes the bridge and its forwarders and exits 0, leaving the
+  container running (`dworm down` stops it);
+- if the bridge breaks (endpoint dies, container stops or restarts) it exits
+  non-zero, so `Restart=on-failure` reconnects it;
+- when stderr is not a terminal, logs use plain `\n` line endings, one line per
+  event.
+
+```ini
+# ~/.config/systemd/user/dworm@.service
+[Unit]
+Description=dworm bridge for %i
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/%i
+ExecStart=%h/.local/bin/dworm up --daemon
+Restart=on-failure
+RestartSec=5
+# Optional: don't retry while another dworm up holds the workspace
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=default.target
+```
+
+While running, `dworm up` keeps a state file (`<hash>.json`, next to the lock)
+with its PID, container, workspace folder, connection state, and forwarded ports.
+
 ### Project environment and host startup commands
 
 Place optional `.dworm.config` and `.dworm.env` files in the workspace directory
@@ -360,7 +399,8 @@ Some E2E tests are conditional:
 
 ## Limitations
 
-- No automatic reconnection on disconnect
+- No automatic reconnection on disconnect (run `dworm up --daemon` under a
+  supervisor such as systemd with `Restart=on-failure`)
 - Port range limited to 1024-20000
 - Linux containers only (amd64 and arm64 endpoints are embedded)
 

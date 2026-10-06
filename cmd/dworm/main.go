@@ -28,10 +28,23 @@ var (
 	configPath string
 	bindAddr   string
 	execDir    string
-	crStderr   = protocol.NewCRWriter(os.Stderr)
-	crStdout   = protocol.NewCRWriter(os.Stdout)
+	crStderr   = protocol.NewLogWriter(os.Stderr)
+	crStdout   = protocol.NewLogWriter(os.Stdout)
 	logger     = log.New(crStderr, "", log.LstdFlags)
 )
+
+// exitAlreadyRunning is the exit code of `dworm up` when another `dworm up`
+// already holds the workspace lock.
+const exitAlreadyRunning = 3
+
+// exitCodeError is an error that main prints before exiting with code.
+type exitCodeError struct {
+	code int
+	err  error
+}
+
+func (e *exitCodeError) Error() string { return e.err.Error() }
+func (e *exitCodeError) Unwrap() error { return e.err }
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -142,10 +155,14 @@ environments.`,
 	if err != nil {
 		exitCode = 1
 		var exitErr *host.ExitError
+		var codeErr *exitCodeError
 		if errors.As(err, &exitErr) {
 			// The command's own exit status; it already reported any error.
 			exitCode = exitErr.Code
 		} else {
+			if errors.As(err, &codeErr) {
+				exitCode = codeErr.code
+			}
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
 	}
@@ -240,6 +257,34 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// One `dworm up` per workspace. The kernel drops the lock on exit or crash.
+	lock, err := host.AcquireInstanceLock(workspacePath)
+	if errors.Is(err, host.ErrAlreadyRunning) {
+		holder := ""
+		if state, stateErr := host.ReadInstanceState(host.InstancePathsFor(workspacePath).State); stateErr == nil {
+			holder = fmt.Sprintf(" (pid %d)", state.PID)
+		}
+		return &exitCodeError{code: exitAlreadyRunning, err: fmt.Errorf(
+			"dworm up is already running for %s%s; use 'dworm shell' or 'dworm exec' alongside it", workspacePath, holder)}
+	}
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	state, err := host.NewStateFile(lock.Paths.State, host.InstanceState{
+		PID:           os.Getpid(),
+		WorkspacePath: workspacePath,
+		StartedAt:     time.Now().UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("write state file: %w", err)
+	}
+	updateState := func(change func(*host.InstanceState)) {
+		if err := state.Update(change); err != nil {
+			logger.Printf("Warning: failed to update state file: %v", err)
+		}
+	}
+
 	projectConfig, staticEnv, err := config.Load(workspacePath)
 	if err != nil {
 		return err
@@ -247,17 +292,21 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if !cmd.Flags().Changed("bind") && projectConfig.Bind != "" {
 		bindAddr = projectConfig.Bind
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// stopCtx ends only on SIGINT/SIGTERM: a requested stop exits 0 and leaves
+	// the container running. ctx is additionally cancelled on bridge failure.
+	stopCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithCancel(stopCtx)
 	defer cancel()
 	cliEnv := parseEnvVars()
 	if err := config.Validate(cliEnv); err != nil {
 		return err
 	}
 	generatedEnv, err := host.RunEnvironmentCommand(ctx, workspacePath, projectConfig.HostEnv, os.Stderr)
-	if err != nil {
-		return err
+	if stopCtx.Err() != nil {
+		return nil
 	}
-	if err := ctx.Err(); err != nil {
+	if err != nil {
 		return err
 	}
 	envs := config.Merge(staticEnv, generatedEnv, cliEnv)
@@ -271,6 +320,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	logger.Printf("Container started: %s", containerInfo.ContainerName)
+	if stopCtx.Err() != nil {
+		return nil
+	}
+	updateState(func(s *host.InstanceState) {
+		s.ContainerID = containerInfo.ContainerID
+		s.ContainerName = containerInfo.ContainerName
+		s.RemoteUser = containerInfo.RemoteUser
+		s.WorkspaceFolder = containerInfo.WorkspaceDir
+	})
 
 	// In interactive (non-daemon) mode, route logs to a buffer for the TUI
 	var logBuffer *tui.LogBuffer
@@ -288,6 +346,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Inject and start endpoint
 	if err := endpoint.InjectAndStart(); err != nil {
+		if stopCtx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("failed to start endpoint: %w", err)
 	}
 
@@ -355,8 +416,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	defer endpoint.Close()
 	if err := endpoint.WaitEnvironmentReady(); err != nil {
+		if stopCtx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("initialize environment: %w", err)
 	}
+	updateState(func(s *host.InstanceState) { s.EndpointConnected = true })
 
 	if sshForward {
 		logger.Printf("SSH agent forwarding enabled")
@@ -411,7 +476,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create tunnel manager and port update channel
-	var tunnelLogWriter io.Writer = protocol.NewCRWriter(os.Stderr)
+	tunnelLogWriter := protocol.NewLogWriter(os.Stderr)
 	if logWriter != nil {
 		tunnelLogWriter = logWriter
 	}
@@ -425,12 +490,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	go func() {
 		for ports := range portUpdateCh {
 			tuiPorts := make([]tui.PortMapping, len(ports))
+			statePorts := make([]host.StatePort, len(ports))
 			for i, p := range ports {
 				tuiPorts[i] = tui.PortMapping{
 					ContainerPort: p.ContainerPort,
 					LocalPort:     p.LocalPort,
 				}
+				statePorts[i] = host.StatePort{Port: p.ContainerPort, Address: bindAddr, LocalPort: p.LocalPort}
 			}
+			updateState(func(s *host.InstanceState) { s.Ports = statePorts })
 			select {
 			case tuiPortUpdateCh <- tuiPorts:
 			default:
@@ -438,18 +506,19 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Handle shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	// Handle control messages
 	transportFailureCh := make(chan error, 1)
 	go func() {
 		for {
 			msgType, data, err := endpoint.RecvControl()
 			if err != nil {
+				if ctx.Err() != nil {
+					// Shutdown closed the bridge.
+					return
+				}
 				transportErr := fmt.Errorf("endpoint transport failed: %w", err)
 				cancel()
+				updateState(func(s *host.InstanceState) { s.EndpointConnected = false })
 				logger.Printf("Forwarding stopped: %v", transportErr)
 				tunnels.Close()
 				transportFailureCh <- transportErr
@@ -471,9 +540,17 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if daemonMode {
 		logger.Printf("Running in daemon mode. Press Ctrl+C to stop.")
 		select {
-		case <-sigCh:
-			logger.Printf("Shutting down...")
+		case <-stopCtx.Done():
 		case err = <-transportFailureCh:
+		}
+		// systemd signals the whole cgroup, so the docker exec carrying the
+		// bridge may die just before our own SIGTERM is delivered. A stop that
+		// arrives with the failure is still a clean shutdown.
+		if err != nil && stopRequested(stopCtx, 500*time.Millisecond) {
+			err = nil
+		}
+		if err == nil {
+			logger.Printf("Shutting down...")
 		}
 	} else {
 		// Start interactive shell with TUI
@@ -491,13 +568,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 			// Check if it's just an exit code
 			if !strings.HasPrefix(shellErr.Error(), "exit ") {
 				logger.Printf("Shell error: %v", shellErr)
-				if strings.HasPrefix(shellErr.Error(), "endpoint transport failed:") {
+				if strings.HasPrefix(shellErr.Error(), "endpoint transport failed:") && !stopRequested(stopCtx, 500*time.Millisecond) {
 					err = shellErr
 				}
 			}
 		}
 	}
 
+	cancel()
 	tunnels.Close()
 	if agentHandler != nil {
 		agentHandler.Close()
@@ -505,6 +583,16 @@ func runUp(cmd *cobra.Command, args []string) error {
 	endpoint.Close()
 
 	return err
+}
+
+// stopRequested reports whether SIGINT/SIGTERM arrived, waiting up to grace.
+func stopRequested(stopCtx context.Context, grace time.Duration) bool {
+	select {
+	case <-stopCtx.Done():
+		return true
+	case <-time.After(grace):
+		return false
+	}
 }
 
 func runDown(cmd *cobra.Command, args []string) error {

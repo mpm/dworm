@@ -15,6 +15,7 @@ type ContainerInfo struct {
 	ContainerID   string
 	ContainerName string
 	WorkspaceDir  string
+	RemoteUser    string
 }
 
 // DevcontainerUp starts a devcontainer and returns container info.
@@ -60,6 +61,7 @@ func DevcontainerUp(workspacePath, configPath string) (*ContainerInfo, error) {
 		ContainerID:   result.ContainerID,
 		ContainerName: name,
 		WorkspaceDir:  result.RemoteWorkspaceDir,
+		RemoteUser:    result.RemoteUser,
 	}, nil
 }
 
@@ -224,6 +226,7 @@ func DevcontainerRebuild(workspacePath, configPath string) (*ContainerInfo, erro
 		ContainerID:   result.ContainerID,
 		ContainerName: name,
 		WorkspaceDir:  result.RemoteWorkspaceDir,
+		RemoteUser:    result.RemoteUser,
 	}, nil
 }
 

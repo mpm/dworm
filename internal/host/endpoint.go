@@ -28,9 +28,9 @@ type EndpointManager struct {
 
 // NewEndpointManager creates a new endpoint manager.
 // If logWriter is non-nil, it is used for both the host logger and endpoint stderr.
-// Otherwise, logs go to os.Stderr via CRWriter.
+// Otherwise, logs go to os.Stderr (via CRWriter when it is a terminal).
 func NewEndpointManager(containerID string, logWriter io.Writer) *EndpointManager {
-	stderr := io.Writer(protocol.NewCRWriter(os.Stderr))
+	stderr := protocol.NewLogWriter(os.Stderr)
 	if logWriter != nil {
 		stderr = logWriter
 	}

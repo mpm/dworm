@@ -3,6 +3,9 @@ package protocol
 import (
 	"bytes"
 	"io"
+	"os"
+
+	"golang.org/x/term"
 )
 
 // CRWriter wraps an io.Writer and ensures each line starts with a carriage return.
@@ -40,4 +43,13 @@ func (c *CRWriter) Write(p []byte) (n int, err error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+// NewLogWriter returns a CRWriter when f is a terminal and f itself
+// otherwise, so logs captured by journald or files keep plain line endings.
+func NewLogWriter(f *os.File) io.Writer {
+	if term.IsTerminal(int(f.Fd())) {
+		return NewCRWriter(f)
+	}
+	return f
 }

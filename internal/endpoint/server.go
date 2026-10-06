@@ -36,7 +36,7 @@ type Server struct {
 // NewServer creates a new endpoint server
 func NewServer() *Server {
 	return &Server{
-		logger:        log.New(protocol.NewCRWriter(os.Stderr), "[endpoint] ", log.LstdFlags),
+		logger:        log.New(os.Stderr, "[endpoint] ", log.LstdFlags),
 		portAddresses: make(map[int]string),
 		setupTimeout:  protocol.TunnelSetupTimeout,
 	}

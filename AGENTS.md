@@ -25,12 +25,13 @@ internal/
 │   ├── mux.go              # Yamux wrapper for multiplexing over stdin/stdout
 │   ├── proxy.go            # BiProxy utility for bidirectional data copying
 │   ├── constants.go        # Shared constants (socket paths, limits)
-│   ├── writer.go           # CRWriter for terminal output
+│   ├── writer.go           # CRWriter for terminal output, NewLogWriter (CR only on terminals)
 │   └── testutil/harness.go # Test harness for in-process testing
 ├── host/                   # Host-side only
 │   ├── container.go        # Devcontainer lifecycle (up/down/remove/rebuild via devcontainer CLI + docker), workspace folder lookup
 │   ├── endpoint.go         # Injects endpoint binary, manages communication
 │   ├── tunnel.go           # Port forwarding (listens locally, proxies to container)
+│   ├── instance.go         # Per-workspace flock, runtime dir, state file (instance_unix.go: flock)
 │   ├── shell.go            # `dworm shell`/`dworm exec` via docker exec (stdio passthrough, ExitError)
 │   ├── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
 │   └── tui/                # Terminal UI for interactive shell
@@ -99,7 +100,7 @@ CLI flags:
 - Async update check runs at startup, prints warning after command completes if newer version exists
 
 Key flows:
-- `up`: DevcontainerUp → InjectAndStart → SendInit → handle port updates → ForwardPort
+- `up`: AcquireInstanceLock → DevcontainerUp → InjectAndStart → SendInit → handle port updates → ForwardPort
 - `down`: DevcontainerDown (finds container by label, docker stop)
 - `shell` / `exec`: start in the workspace folder from `ResolveWorkspaceFolder` (`container.go`: the bind
   mount containing the workspace path, mapped into the container; "" = image default). `exec --workdir/-w`
@@ -110,6 +111,28 @@ Key flows:
   (`host.ExitError`, handled in `main()`); SIGINT/SIGTERM are forwarded to the docker CLI.
 - `remove [--force]`: DevcontainerRemove (finds container by label, docker stop + rm + rmi; prompts for confirmation unless `--force`)
 - `rebuild`: DevcontainerRebuild (calls `devcontainer up --remove-existing-container`; rebuilds and exits, user runs `up` separately)
+
+### `dworm up` instance lock, state file, and lifecycle (`internal/host/instance.go`)
+
+- Runtime dir: `$XDG_RUNTIME_DIR/dworm/`, fallback `/tmp/dworm-$UID/` (created/chmodded to 0700).
+- Files are named after `sha256(absolute workspace path)[:12]`: `<hash>.lock`, `<hash>.json`
+  (and `<hash>.sock`, see exec over the bridge). The short name keeps socket paths < 108 bytes.
+- `up` (TUI and daemon) takes `LOCK_EX|LOCK_NB` on `<hash>.lock` before anything else. If held:
+  exit code **3** (`exitAlreadyRunning` in `cmd/dworm/main.go`). The lock file is never deleted.
+  `InstanceRunning` probes with a momentary `LOCK_SH|LOCK_NB`; acquisition retries for ~250ms so a
+  concurrent probe cannot make `up` fail.
+- State file `<hash>.json`, rewritten atomically (temp file + rename) by `StateFile.Update`, removed
+  on exit. Fields: `pid`, `workspace_path`, `container_id`, `container_name`, `remote_user`,
+  `workspace_folder` (in-container path), `started_at`, `endpoint_connected`, `ports`
+  (`[{port, address, local_port}]`: container port, host bind address, host port). Updated after
+  container start, endpoint init, every forwarded-port change, and on bridge failure.
+  Only trust it while the lock is held.
+- Signals: `stopCtx` (SIGINT/SIGTERM) → clean shutdown, exit 0, container keeps running.
+  Bridge failure (control stream EOF) → exit 1 so systemd `Restart=on-failure` restarts it. Because
+  systemd signals the whole cgroup, a failure that coincides with a stop signal (500ms grace) is
+  treated as a stop.
+- Logs: `protocol.NewLogWriter` uses `CRWriter` only when the file is a terminal; the endpoint logs
+  plain lines to its stderr pipe.
 
 ### Endpoint Binary (`cmd/dworm_endpoint/`)
 
@@ -205,6 +228,7 @@ Test files:
 - `internal/protocol/messages_test.go` - Message encoding/decoding
 - `internal/endpoint/portscanner_test.go` - /proc/net/tcp parsing, port diff logic
 - `internal/host/agent_test.go` - SSH/GPG/git credential stream routing
+- `internal/host/instance_test.go` - Instance lock exclusivity/probing, state file
 - `internal/host/shell_test.go` - `docker exec` argument building, stdio/exit code passthrough (fake `docker` on PATH)
 
 **Test harness** (`internal/protocol/testutil/harness.go`):
@@ -224,7 +248,8 @@ E2E scripts in `test/e2e/`:
 - `run-e2e.sh` - Main runner with Docker auto-detection
 - `test-port-forward.sh` - Port forwarding test
 - `test-env-vars.sh` - Environment variable forwarding
-- `test-exec-stdio.sh` - `dworm exec` stdin/stdout passthrough, stdin EOF, exit codes
+- `test-exec-stdio.sh` - `dworm exec` stdin/stdout passthrough, stdin EOF, exit codes, working directory
+- `test-daemon.sh` - `up --daemon` single instance (exit 3), state file, SIGTERM exit 0, bridge failure exit ≠ 0
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
 - `test-git-creds.sh` - Git credential forwarding (conditional)
