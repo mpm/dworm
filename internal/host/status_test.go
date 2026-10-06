@@ -66,9 +66,11 @@ func TestGetStatusWithContainerAndRunningUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Release()
+	// No socket: the status comes from the state file, without clients.
 	if _, err := NewStateFile(lock.Paths.State, InstanceState{
 		PID: 99, ContainerID: "2e7d99a944c1aaaaaaaa", WorkspaceFolder: "/workspaces/override",
 		EndpointConnected: true, Ports: []StatePort{{Port: 3000, Address: "127.0.0.1", LocalPort: 3000}},
+		State: StateReconnecting, Mode: ModeDetached, Reconnects: 2, Clients: 5, LogPath: "/run/x.log", DwormVersion: "v0.8.0",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +88,9 @@ func TestGetStatusWithContainerAndRunningUp(t *testing.T) {
 		t.Fatalf("WorkspaceFolder = %q", got)
 	}
 	data, _ := json.Marshal(status)
+	if up := status.Up; up.State != StateReconnecting || up.Mode != ModeDetached || *up.Reconnects != 2 || up.Clients != nil || up.LogPath != "/run/x.log" || up.DwormVersion != "v0.8.0" {
+		t.Fatalf("up from state file = %+v", up)
+	}
 	for _, field := range []string{`"pid":99`, `"started_at"`, `"ports":[{"port":3000,"address":"127.0.0.1","local_port":3000}]`} {
 		if field == `"started_at"` {
 			if strings.Contains(string(data), field) {

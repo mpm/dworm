@@ -585,3 +585,33 @@ func TestInstanceEventsForExecsAndEndpointLogs(t *testing.T) {
 		t.Fatalf("client events = %v", attached)
 	}
 }
+
+func TestGetStatusUsesLiveInstance(t *testing.T) {
+	f := startInstance(t, nil)
+	waitState(t, f.paths.Socket, StateReady)
+	events, err := SubscribeEvents(f.paths.Socket, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+	fakeDocker(t, "exit 0\n") // no container
+	waitFor(t, "client count", func() bool {
+		status, err := GetStatus(f.inst.opts.WorkspacePath, "vtest")
+		return err == nil && status.Up.Clients != nil && *status.Up.Clients == 1
+	})
+	status, err := GetStatus(f.inst.opts.WorkspacePath, "vtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := status.Up
+	if !up.Running || up.PID != os.Getpid() || up.State != StateReady || up.Mode != ModeForeground ||
+		!up.EndpointConnected || *up.Reconnects != 0 || up.DwormVersion != "vtest" || up.ExecSocket != f.paths.Socket {
+		t.Fatalf("up = %+v", up)
+	}
+	data, _ := json.Marshal(status)
+	for _, field := range []string{`"state":"ready"`, `"mode":"foreground"`, `"reconnects":0`, `"clients":1`, `"dworm_version":"vtest"`} {
+		if !strings.Contains(string(data), field) {
+			t.Fatalf("status JSON lacks %s: %s", field, data)
+		}
+	}
+}

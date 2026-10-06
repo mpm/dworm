@@ -26,15 +26,23 @@ type ContainerStatus struct {
 	WorkspaceFolder string `json:"workspace_folder"`
 }
 
-// UpStatus describes the workspace's `dworm up` process. PID, StartedAt, and
-// ExecSocket are omitted when no `dworm up` holds the workspace lock.
+// UpStatus describes the workspace's instance. Only Running,
+// EndpointConnected and Ports are present when no instance holds the
+// workspace lock; Clients only when the instance answered op status.
 type UpStatus struct {
 	Running           bool        `json:"running"`
 	PID               int         `json:"pid,omitempty"`
 	StartedAt         *time.Time  `json:"started_at,omitempty"`
+	State             string      `json:"state,omitempty"`
+	Reason            string      `json:"reason,omitempty"`
+	Mode              string      `json:"mode,omitempty"`
 	EndpointConnected bool        `json:"endpoint_connected"`
+	Reconnects        *int        `json:"reconnects,omitempty"`
+	Clients           *int        `json:"clients,omitempty"`
 	Ports             []StatePort `json:"ports"`
 	ExecSocket        string      `json:"exec_socket,omitempty"`
+	LogPath           string      `json:"log_path,omitempty"`
+	DwormVersion      string      `json:"dworm_version,omitempty"`
 }
 
 // RunningInstance returns the state of the `dworm up` holding the workspace
@@ -62,21 +70,47 @@ func WorkspaceFolder(containerID, workspacePath string) string {
 	return ResolveWorkspaceFolder(containerID, workspacePath)
 }
 
+// liveInstance returns the state of the running instance: live from op
+// status when it answers (live = true), else from the state file.
+func liveInstance(workspacePath string) (state *InstanceState, live bool, err error) {
+	paths := InstancePathsFor(workspacePath)
+	running, err := InstanceRunning(paths)
+	if err != nil || !running {
+		return nil, false, err
+	}
+	if state, err := QueryInstance(paths.Socket); err == nil {
+		return state, true, nil
+	}
+	state, err = RunningInstance(workspacePath)
+	return state, false, err
+}
+
 // GetStatus collects the workspace status. A missing container is not an error.
 func GetStatus(workspacePath, dwormVersion string) (*Status, error) {
 	status := &Status{WorkspacePath: workspacePath, DwormVersion: dwormVersion, Up: UpStatus{Ports: []StatePort{}}}
 
-	instance, err := RunningInstance(workspacePath)
+	instance, live, err := liveInstance(workspacePath)
 	if err != nil {
-		return nil, fmt.Errorf("check dworm up instance: %w", err)
+		return nil, fmt.Errorf("check dworm instance: %w", err)
 	}
 	if instance != nil {
+		reconnects := instance.Reconnects
 		status.Up = UpStatus{
 			Running:           true,
 			PID:               instance.PID,
+			State:             instance.State,
+			Reason:            instance.Reason,
+			Mode:              instance.Mode,
 			EndpointConnected: instance.EndpointConnected,
+			Reconnects:        &reconnects,
 			Ports:             instance.Ports,
 			ExecSocket:        instance.ExecSocket,
+			LogPath:           instance.LogPath,
+			DwormVersion:      instance.DwormVersion,
+		}
+		if live {
+			clients := instance.Clients
+			status.Up.Clients = &clients
 		}
 		if !instance.StartedAt.IsZero() {
 			status.Up.StartedAt = &instance.StartedAt

@@ -281,15 +281,19 @@ Fields (all always present unless noted):
 - `container`: `null` when no container (running or stopped) has label
   `devcontainer.local_folder=<workspace_path>`, else an object:
   - `id` (12-char short ID), `name`, `running`
-  - `remote_user`: from the running `up`'s state, else the `devcontainer.metadata` label (last
+  - `remote_user`: from the running instance, else the `devcontainer.metadata` label (last
     `remoteUser`, then last `containerUser`, then the image user)
-  - `workspace_folder`: from the running `up`'s state, else the bind-mount heuristic
+  - `workspace_folder`: from the running instance, else the bind-mount heuristic
 - `up`: `running` (true only if the lock is held, checked with a non-blocking flock),
   `endpoint_connected`, `ports` (`[{port, address, local_port}]`, `[]` when not running), and when
-  running `pid`, `started_at` (RFC 3339, omitted if unknown), `exec_socket` (omitted if disabled)
-- `dworm_version`: `version.Version`
+  running: `pid`, `started_at` (RFC 3339, omitted if unknown), `state`, `reason` (if any), `mode`
+  (`detached`/`foreground`), `reconnects`, `clients` (only when the instance answered op `status`),
+  `exec_socket`, `log_path` (detached instances), `dworm_version` (the instance's)
+- `dworm_version`: `version.Version` of this client
 
-The human-readable output (default) shows the same information.
+With a running instance the data comes live from op `status`; if it does not answer (e.g. a v0.7.0
+`dworm up`), from the lock + state file. The human-readable output (default) shows the same
+information and flags an instance of another version.
 
 ### Endpoint Binary (`cmd/dworm_endpoint/`)
 
@@ -400,7 +404,8 @@ Test files:
 - `internal/endpoint/server_test.go` - also: logs switch to the control channel after init, first port
   report even when empty
 - `cmd/dworm/main_test.go` - usage on errors, `dworm logs` event formatting
-- `internal/host/status_test.go` - Status JSON shape, metadata/remote user parsing (fake `docker`)
+- `internal/host/status_test.go` - Status JSON shape, metadata/remote user parsing, state-file fallback
+  (fake `docker`); `instancerun_test.go` covers the live status of a running instance
 - `internal/protocol/exec_test.go` - Exec frame/message encoding and size limits
 - `internal/endpoint/exec_test.go` - Exec streams over the harness: stdio, env/cwd, signals, exit codes,
   rejections/limits, concurrency, process-group kill on disconnect and shutdown; TTY mode: resize
@@ -431,8 +436,9 @@ E2E scripts in `test/e2e/`:
   (via the instance and with `--no-bridge`)
 - `test-exec-socket.sh` - Raw socket client (python3), `dworm exec` via the socket, no processes left
   after killed callers or `up` shutdown (`pgrep` in the container)
-- `test-daemon.sh` - `up --foreground` single instance (exit 3), state file, `status --json`, SIGTERM exit 0,
-  reconnect after `docker restart` (same PID, `reconnects` 1, exec works)
+- `test-daemon.sh` - `up --foreground` single instance (exit 3), state file, `status --json` (state, mode,
+  reconnects, clients), SIGTERM exit 0, reconnect after `docker restart` (same PID, `reconnects` 1,
+  state `ready`, exec works)
 - `test-ssh-agent.sh` - SSH agent forwarding (conditional - skips if no agent)
 - `test-gpg-agent.sh` - GPG agent forwarding (conditional)
 - `test-git-creds.sh` - Git credential forwarding (conditional)

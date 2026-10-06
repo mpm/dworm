@@ -172,7 +172,7 @@ event stream (state, ports, log, exec_started, exec_exited, client, dropped).`,
 	// Status command
 	statusCmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show container, dworm up, and forwarded port status",
+		Short: "Show container, instance, and forwarded port status",
 		Args:  cobra.NoArgs,
 		RunE:  runOperationalCommand(runStatus),
 	}
@@ -711,20 +711,39 @@ func printStatus(w io.Writer, status *host.Status) {
 
 	up := status.Up
 	if !up.Running {
-		fmt.Fprintf(w, "dworm up:   not running\n")
+		fmt.Fprintf(w, "Instance:   not running\n")
 		return
 	}
-	since := ""
+	details := []string{fmt.Sprintf("pid %d", up.PID)}
+	if up.Mode != "" {
+		details = append(details, up.Mode)
+	}
 	if up.StartedAt != nil {
-		since = ", since " + up.StartedAt.Local().Format(time.DateTime)
+		details = append(details, "since "+up.StartedAt.Local().Format(time.DateTime))
 	}
 	connection := "endpoint not connected"
 	if up.EndpointConnected {
 		connection = "endpoint connected"
 	}
-	fmt.Fprintf(w, "dworm up:   running (pid %d%s), %s\n", up.PID, since, connection)
+	state := valueOrDash(up.State)
+	if up.Reason != "" {
+		state += " (" + up.Reason + ")"
+	}
+	fmt.Fprintf(w, "Instance:   %s (%s), %s\n", state, strings.Join(details, ", "), connection)
+	if up.DwormVersion != "" && up.DwormVersion != status.DwormVersion {
+		fmt.Fprintf(w, "  Version:          %s (this is %s; run 'dworm stop')\n", up.DwormVersion, status.DwormVersion)
+	}
+	if up.Clients != nil {
+		fmt.Fprintf(w, "  Clients:          %d\n", *up.Clients)
+	}
+	if up.Reconnects != nil && *up.Reconnects > 0 {
+		fmt.Fprintf(w, "  Reconnects:       %d\n", *up.Reconnects)
+	}
+	if up.LogPath != "" {
+		fmt.Fprintf(w, "  Log file:         %s\n", up.LogPath)
+	}
 	if up.ExecSocket != "" {
-		fmt.Fprintf(w, "  Exec socket:      %s\n", up.ExecSocket)
+		fmt.Fprintf(w, "  Socket:           %s\n", up.ExecSocket)
 	}
 	if len(up.Ports) == 0 {
 		fmt.Fprintf(w, "  Forwarded ports:  none\n")

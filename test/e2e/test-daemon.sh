@@ -60,6 +60,7 @@ fi
 
 log_info "Checking dworm status --json..."
 for check in "up.running=true" "up.pid=$DWORM_PID" "up.endpoint_connected=true" \
+    "up.state=\"ready\"" "up.mode=\"foreground\"" "up.reconnects=0" "up.clients=0" \
     "container.running=true" "container.workspace_folder=\"/home/developer/workspace\""; do
     got=$(status_field "${check%%=*}")
     if [[ "$got" != "${check#*=}" ]]; then
@@ -113,7 +114,7 @@ log_info "Checking that the instance reconnects after docker restart..."
 start_daemon "$LOG_DIR/third.log"
 docker restart "$CONTAINER_ID" >/dev/null
 for ((i = 0; i < 60; i++)); do
-    if [[ "$(state_field reconnects)" == "1" && "$(state_field state)" == '"ready"' ]]; then
+    if [[ "$(status_field up.reconnects)" == "1" && "$(status_field up.state)" == '"ready"' ]]; then
         break
     fi
     if ! kill -0 "$DWORM_PID" 2>/dev/null; then
@@ -123,8 +124,8 @@ for ((i = 0; i < 60; i++)); do
     fi
     sleep 1
 done
-if [[ "$(state_field pid)" != "$DWORM_PID" || "$(state_field state)" != '"ready"' ]]; then
-    log_fail "instance did not reconnect: pid $(state_field pid) (want $DWORM_PID), state $(state_field state), reconnects $(state_field reconnects)"
+if [[ "$(status_field up.pid)" != "$DWORM_PID" || "$(status_field up.state)" != '"ready"' ]]; then
+    log_fail "instance did not reconnect: pid $(status_field up.pid) (want $DWORM_PID), state $(status_field up.state), reconnects $(status_field up.reconnects)"
     cat "$LOG_DIR/third.log"
     exit 1
 fi
