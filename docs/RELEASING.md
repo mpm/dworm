@@ -7,7 +7,8 @@ GitHub Actions release workflow injects the pushed tag into the host binary.
 ## Prepare
 
 1. Choose a version. Use a minor release for new functionality; project environment
-   configuration shipped in v0.5.0; self-update and embedded endpoints use **v0.6.0**.
+   configuration shipped in v0.5.0, self-update and embedded endpoints in v0.6.0;
+   unattended-use features (daemon lock/state, `status --json`, exec socket) use **v0.7.0**.
 2. Update the README and add user-facing notes at `docs/releases/vX.Y.Z.md`.
    Include any host/endpoint compatibility or upgrade instructions.
 3. Run the relevant checks:
@@ -30,12 +31,12 @@ pushing its version tag.
 
 ## Publish
 
-For the prepared v0.6.0 commit:
+For the prepared v0.7.0 commit:
 
 ```bash
-git tag -a v0.6.0 -m "v0.6.0"
+git tag -a v0.7.0 -m "v0.7.0"
 git push origin HEAD
-git push origin v0.6.0
+git push origin v0.7.0
 ```
 
 Use the repository's configured signing settings when creating tags.
@@ -97,3 +98,19 @@ not macOS runtime replacement validation.
   `docker exec` environment assertion; GPG failed installing missing tools;
   removal hit an image referenced by multiple tags; real git credentials skipped
   because no host helper was configured. The full suite is not claimed to pass.
+
+## v0.7.0 validation record
+
+- `go test ./...` and `go vet ./...` passed on Linux amd64 (Go 1.27.1); the exec,
+  instance-lock, and status suites also passed 10 repeated runs. The race detector
+  was not run: the validation host has no C compiler for cgo.
+- Host cross-builds passed for Linux arm64 and macOS amd64/arm64. macOS was not
+  runtime-tested; its exec socket lacks `SO_PEERCRED` and raw-mode hangup detection.
+- The full Docker suite passed 9 tests (port forwarding, environment variables,
+  exec stdio both via the socket and `docker exec`, exec socket, daemon lifecycle,
+  project environment, embedded endpoint, rebuild, remove). SSH, GPG, and git
+  credential tests skipped: no agent, secret keys, or credential helper on the host.
+- A throwaway systemd user unit (`systemd-run --user`, `Restart=on-failure`)
+  reconnected after `docker restart` (one restart), stopped as `inactive (dead)`
+  with exit status 0 while the container kept running, and logged no carriage
+  returns to journald.
