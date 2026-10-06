@@ -41,19 +41,20 @@ internal/
 │   ├── controlclient.go    # Socket client ops: status, events, stop (StopInstance)
 │   ├── execserver.go       # Instance unix socket: op dispatch (exec raw/framed → bridge exec streams, events, status, stop)
 │   ├── execserver_linux.go # SO_PEERCRED check, POLLHUP disconnect detection for raw mode
-│   ├── execclient.go       # `dworm exec` client for the socket (framed mode)
+│   ├── execclient.go       # Socket exec client: ExecSession, ExecViaSocket (framed), ExecTTY (terminal)
 │   ├── status.go           # `dworm status` data (GetStatus, RunningInstance, WorkspaceFolder)
-│   ├── shell.go            # `dworm exec --no-bridge` via docker exec (stdio passthrough, ExitError)
+│   ├── shell.go            # `dworm exec --no-bridge` via docker exec (stdio passthrough, ExitError), StdioIsTerminal
 │   ├── agent.go            # SSH/GPG agent forwarding (accepts streams from endpoint)
 │   └── tui/                # Terminal UI for interactive shell
-│       ├── model.go        # Main TUI session with PTY and 3-goroutine architecture
+│       ├── model.go        # TUI session: TTY exec over the instance socket, events → status bar
 │       ├── statusbar.go    # Status bar component (lipgloss-styled)
 │       ├── messages.go     # Message types (PortMapping, PortUpdateMsg)
 │       ├── styles.go       # lipgloss style definitions
-│       └── fallback.go     # Non-TTY fallback mode
+│       └── fallback.go     # Non-TTY fallback: plain framed exec of the shell
 ├── endpoint/               # Container-side only
 │   ├── server.go           # Main server loop, handles control messages, dispatches host-opened streams
-│   ├── exec.go             # Exec streams: spawns processes in own process groups, kills on disconnect
+│   ├── exec.go             # Exec streams: process groups or PTY sessions, kills/hangs up on disconnect
+│   ├── session.go          # TTY session members via /proc (signal every member of a session)
 │   ├── portscanner.go      # Scans /proc/net/tcp for listening ports
 │   ├── env.go              # Environment variable handling
 │   ├── agent.go            # SSH agent forwarding (Unix socket listener)
@@ -144,9 +145,10 @@ Key flows (see "Instance lifecycle" below):
   Exit code **3** (`exitAlreadyRunning`) if an instance already holds the lock.
 - `stop`: op `stop` over the socket (SIGTERM for instances without socket ops), wait until it exited.
   The container keeps running. `down`, `remove`, `rebuild` stop the instance first.
-- `shell`: `ensure`, then a shell in the workspace folder.
+- `shell`: `ensure`, then the TUI shell (same as `up` on a TTY).
 - `exec -- CMD...`: `ensure` (never applies `-e` to the instance; `-e` is per request), then run over
-  the socket (see "Exec over the bridge"). No silent `docker exec` fallback; `--no-bridge` runs plain
+  the socket (see "Exec over the bridge"): `ExecTTY` (raw local terminal, PTY in the container, resize
+  frames, no status bar) when stdin and stdout are terminals, framed `ExecViaSocket` otherwise. No silent `docker exec` fallback; `--no-bridge` runs plain
   `docker exec -i[t]` through the `--with-env` launcher (workspace folder from `host.WorkspaceFolder`).
   Stdin is always attached. stdout carries only the child's stdout (all diagnostics go to stderr). The
   child's exit status becomes dworm's exit status (`host.ExitError`, handled in `main()`).
@@ -189,9 +191,18 @@ Client protocol (one connection = one process):
 
 The endpoint spawns with `Setpgid`, as the endpoint's user, resolving `argv[0]` with the merged `PATH`.
 
-`dworm exec` uses the socket in framed mode when stdin and stdout are not both terminals (TTY sessions
-still use `docker exec -it`). The client forwards SIGINT/SIGTERM/SIGHUP as signal frames; the exit
-frame's code becomes dworm's exit code.
+`dworm exec` always uses the socket in framed mode. Without a TTY the client forwards
+SIGINT/SIGTERM/SIGHUP as signal frames. With a TTY it adds `tty` (local rows/cols, `$TERM`), puts the
+local terminal in raw mode, sends `FrameResize` on SIGWINCH, forwards SIGINT/SIGTERM, and disconnects
+on SIGHUP. The exit frame's code becomes dworm's exit code.
+
+TTY mode (`"tty":{"rows":R,"cols":C,"term":"…"}`, framed mode only): the endpoint starts the process
+on a new PTY (`creack/pty`) as session leader with a controlling TTY (so pgid = sid = pid) and `TERM`
+set. All output is `FrameStdout` (no `FrameStderr`); `FrameResize` (0x06, `{"rows":R,"cols":C}`) calls
+`pty.Setsize`; Ctrl-C/Ctrl-Z travel as stdin bytes; `FrameStdinEOF` is ignored; `FrameSignal` still
+signals the process group. Disconnect = SIGHUP to every session member (`/proc/*/stat`, so job-control
+groups are included), then SIGTERM → 5s → SIGKILL. When the leader exits, output is drained for up to
+1s, the PTY is closed, and remaining session members get SIGHUP (like a closed terminal).
 
 ### Event stream (op `events`, `internal/host/events.go`)
 
@@ -325,18 +336,21 @@ For each detected port:
 
 ### TUI Shell Session (`internal/host/tui/`)
 
-Interactive shell with status line showing container name and forwarded ports:
-- Uses PTY for proper terminal handling (resize, raw mode)
-- 3-goroutine architecture: output reader, input handler, event handler
-- Status bar at bottom styled with lipgloss (reverse video)
-- Scroll region restricts shell output to above status bar
-- Toggle expanded port view with Ctrl+G
+`tui.Run(Config{SocketPath, ContainerName, Argv})` is a socket client (used by `dworm shell` and
+`dworm up` on a TTY); the shell runs on a PTY in the container (TTY exec, see above):
+- stdin bytes → `FrameStdin`, `FrameStdout` → the terminal (with ANSI repair for the scroll region)
+- SIGWINCH sends `FrameResize` with the shell height (terminal height minus the status bar)
+- Status bar at bottom styled with lipgloss (reverse video): container name, instance state (unless
+  `ready`, e.g. `[reconnecting...]`), ports, and logs, all from op `events`
+- When the exec ends with `bridge lost`, it prints a notice, waits until the instance is `ready`
+  again, and starts a new shell; it exits when the instance stops
+- Scroll region restricts shell output to above status bar; Ctrl+G toggles the expanded view
 - Clear screen detection re-renders status bar after vim/htop/etc
-- Falls back to basic `docker exec` shell if not running in a TTY
+- Without a TTY: plain framed exec of the shell (`fallback.go`)
 
 Key files:
-- `model.go`: Main `Run()` function and session orchestration
-- `statusbar.go`: `StatusBar` component with collapsed/expanded modes
+- `model.go`: `Run()`, session loop, input/event goroutines, terminal layout
+- `statusbar.go`: `StatusBar` component with collapsed/expanded modes and instance state
 - `messages.go`: `PortMapping` and `PortUpdateMsg` types
 - `fallback.go`: Non-TTY fallback for piped/scripted usage
 
@@ -389,9 +403,11 @@ Test files:
 - `internal/host/status_test.go` - Status JSON shape, metadata/remote user parsing (fake `docker`)
 - `internal/protocol/exec_test.go` - Exec frame/message encoding and size limits
 - `internal/endpoint/exec_test.go` - Exec streams over the harness: stdio, env/cwd, signals, exit codes,
-  rejections/limits, concurrency, process-group kill on disconnect and shutdown
+  rejections/limits, concurrency, process-group kill on disconnect and shutdown; TTY mode: resize
+  (`stty size`), `TERM`, Ctrl-C bytes, disconnect → SIGHUP first → whole session gone
 - `internal/host/execserver_test.go` - Exec socket against a fake endpoint: raw ↔ framed translation,
-  half-close vs disconnect, validation, CLI client, stderr rate limiting
+  half-close vs disconnect, validation, CLI client, stderr rate limiting, TTY requests and resize
+  frames, bridge-lost exit frames
 - `internal/host/shell_test.go` - `docker exec` argument building, stdio/exit code passthrough (fake `docker` on PATH)
 
 **Test harness** (`internal/protocol/testutil/harness.go`):

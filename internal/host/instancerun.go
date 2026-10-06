@@ -71,7 +71,7 @@ func defaultInstanceDeps() instanceDeps {
 		devcontainerUp: DevcontainerUp,
 		startEndpoint: func(ctx context.Context, containerID string, hostLog, endpointStderr io.Writer) (endpointConn, error) {
 			e := NewEndpointManager(containerID, hostLog)
-			e.logger = log.New(hostLog, "[host] ", 0) // the instance log adds timestamps
+			e.logger = log.New(hostLog, "", 0) // the instance log adds timestamps
 			e.stderrWriter = endpointStderr
 			if err := e.InjectAndStart(); err != nil {
 				e.Close()
@@ -568,7 +568,8 @@ func (i *Instance) ready() bool {
 // readyBridge returns the bridge while the instance is ready.
 func (i *Instance) readyBridge() *bridgeSession {
 	b := i.currentBridge()
-	if b == nil || i.state.Snapshot().State != StateReady {
+	// A failed mux is not ready even before the reconnect starts.
+	if b == nil || b.mux.IsClosed() || i.state.Snapshot().State != StateReady {
 		return nil
 	}
 	return b

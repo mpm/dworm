@@ -24,12 +24,6 @@ func (e *ExitError) Error() string {
 	return fmt.Sprintf("exit status %d", e.Code)
 }
 
-// ExecShell opens an interactive shell in the container
-func ExecShell(containerID string, workDir string, envVars map[string]string) error {
-	args := buildDockerExecArgs(containerID, workDir, envVars, true, true, []string{"/bin/bash"})
-	return runDocker(args, os.Stdin, os.Stdout, os.Stderr)
-}
-
 // ExecCommand runs a command in the container and exits when it completes.
 // Stdin is always attached; a TTY is allocated only when stdin and stdout are
 // both terminals, so piped use gets a clean byte stream.

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/mpm/dworm/internal/config"
 	"github.com/mpm/dworm/internal/protocol"
 )
@@ -35,7 +36,8 @@ type execManager struct {
 
 type execProcess struct {
 	id   string
-	pgid int // 0 until started; guarded by execManager.mu
+	tty  bool // a TTY session: pgid is also its session ID
+	pgid int  // 0 until started; guarded by execManager.mu
 }
 
 func newExecManager(logger *log.Logger) *execManager {
@@ -80,23 +82,55 @@ func (m *execManager) started(p *execProcess, pgid int) (closed bool) {
 func (m *execManager) closeAll() {
 	m.mu.Lock()
 	m.closed = true
-	var groups []int
+	var procs []execProcess
 	for p := range m.running {
 		if p.pgid > 0 {
-			groups = append(groups, p.pgid)
+			procs = append(procs, *p)
 		}
 	}
 	m.mu.Unlock()
 
 	var wg sync.WaitGroup
-	for _, pgid := range groups {
+	for _, p := range procs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m.terminate(pgid)
+			m.kill(&p)
 		}()
 	}
 	wg.Wait()
+}
+
+// kill ends a process whose caller is gone: a TTY session is hung up, a
+// plain process group terminated.
+func (m *execManager) kill(p *execProcess) {
+	if p.tty {
+		m.hangup(p.pgid)
+	} else {
+		m.terminate(p.pgid)
+	}
+}
+
+// hangup ends a TTY session like a closed terminal: SIGHUP to every member
+// first, then SIGTERM and, after the grace period, SIGKILL.
+func (m *execManager) hangup(sid int) {
+	if sid <= 0 {
+		return
+	}
+	hupGrace := min(m.grace, time.Second)
+	for _, step := range []struct {
+		sig   syscall.Signal
+		grace time.Duration
+	}{{syscall.SIGHUP, hupGrace}, {syscall.SIGTERM, m.grace}, {syscall.SIGKILL, 0}} {
+		signalSession(sid, step.sig)
+		deadline := time.Now().Add(step.grace)
+		for time.Now().Before(deadline) {
+			if !sessionAlive(sid) {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 }
 
 // terminate sends SIGTERM to the process group and SIGKILL after the grace
@@ -153,7 +187,14 @@ func (m *execManager) handle(stream net.Conn) {
 	}
 	defer m.unregister(p)
 
-	cmd, stdio, err := startProcess(req.Argv, req.Cwd, env)
+	p.tty = req.TTY != nil
+	var cmd *exec.Cmd
+	var stdio *processStdio
+	if p.tty {
+		cmd, stdio, err = startTTYProcess(req.Argv, req.Cwd, env, req.TTY)
+	} else {
+		cmd, stdio, err = startProcess(req.Argv, req.Cwd, env)
+	}
 	if err != nil {
 		code := 126
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, exec.ErrNotFound) {
@@ -166,7 +207,7 @@ func (m *execManager) handle(stream net.Conn) {
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
 	if m.started(p, pgid) {
-		m.terminate(pgid)
+		m.kill(p)
 	}
 
 	callerGone := make(chan struct{})
@@ -177,7 +218,11 @@ func (m *execManager) handle(stream net.Conn) {
 		markGone()
 	}
 	stream.SetDeadline(time.Time{})
-	m.logger.Printf("Exec %s started: %s (pid %d)", req.ID, req.Argv[0], pgid)
+	mode := ""
+	if p.tty {
+		mode = ", tty"
+	}
+	m.logger.Printf("Exec %s started: %s (pid %d%s)", req.ID, req.Argv[0], pgid, mode)
 
 	var writeMu sync.Mutex
 	writeFrame := func(frameType byte, payload []byte) error {
@@ -189,7 +234,6 @@ func (m *execManager) handle(stream net.Conn) {
 	var pumps sync.WaitGroup
 	pump := func(r *os.File, frameType byte) {
 		defer pumps.Done()
-		defer r.Close()
 		buf := make([]byte, 32*1024)
 		failed := false
 		for {
@@ -206,9 +250,14 @@ func (m *execManager) handle(stream net.Conn) {
 			}
 		}
 	}
-	pumps.Add(2)
-	go pump(stdio.stdout, protocol.FrameStdout)
-	go pump(stdio.stderr, protocol.FrameStderr)
+	if p.tty {
+		pumps.Add(1)
+		go pump(stdio.pty, protocol.FrameStdout)
+	} else {
+		pumps.Add(2)
+		go func() { pump(stdio.stdout, protocol.FrameStdout); stdio.stdout.Close() }()
+		go func() { pump(stdio.stderr, protocol.FrameStderr); stdio.stderr.Close() }()
+	}
 	pumpsDone := make(chan struct{})
 	go func() {
 		pumps.Wait()
@@ -217,7 +266,9 @@ func (m *execManager) handle(stream net.Conn) {
 
 	stdinCh := make(chan []byte, 16)
 	go func() {
-		defer stdio.stdin.Close()
+		if !p.tty {
+			defer stdio.stdin.Close()
+		}
 		for data := range stdinCh {
 			if _, err := stdio.stdin.Write(data); err != nil {
 				for range stdinCh {
@@ -250,7 +301,10 @@ func (m *execManager) handle(stream net.Conn) {
 					stdinCh <- payload
 				}
 			case protocol.FrameStdinEOF:
-				closeStdin()
+				// A terminal has no EOF; keys like Ctrl-D are stdin bytes.
+				if !p.tty {
+					closeStdin()
+				}
 			case protocol.FrameSignal:
 				var msg protocol.ExecSignal
 				if json.Unmarshal(payload, &msg) != nil {
@@ -260,6 +314,11 @@ func (m *execManager) handle(stream net.Conn) {
 					syscall.Kill(-pgid, sig)
 				} else {
 					m.logger.Printf("Exec %s: ignoring unknown signal %q", req.ID, msg.Signal)
+				}
+			case protocol.FrameResize:
+				var size protocol.ExecResize
+				if p.tty && json.Unmarshal(payload, &size) == nil {
+					pty.Setsize(stdio.pty, winsize(size.Rows, size.Cols))
 				}
 			default:
 				m.logger.Printf("Exec %s: ignoring unknown frame type %d", req.ID, frameType)
@@ -271,15 +330,28 @@ func (m *execManager) handle(stream net.Conn) {
 	case <-waitErr:
 	case <-callerGone:
 		m.logger.Printf("Exec %s: caller disconnected, terminating process group %d", req.ID, pgid)
-		m.terminate(pgid)
+		m.kill(p)
 		<-waitErr
 	}
-	// The process has exited; drain output still held by its group.
-	select {
-	case <-pumpsDone:
-	case <-callerGone:
-		m.terminate(pgid)
+	if p.tty {
+		// Like a closing terminal: output still buffered in the PTY is
+		// forwarded briefly, then the remaining session members get SIGHUP.
+		select {
+		case <-pumpsDone:
+		case <-callerGone:
+		case <-time.After(time.Second):
+		}
+		stdio.pty.Close()
 		<-pumpsDone
+		signalSession(pgid, syscall.SIGHUP)
+	} else {
+		// The process has exited; drain output still held by its group.
+		select {
+		case <-pumpsDone:
+		case <-callerGone:
+			m.terminate(pgid)
+			<-pumpsDone
+		}
 	}
 
 	exit := exitStatus(cmd.ProcessState)
@@ -292,7 +364,38 @@ func (m *execManager) handle(stream net.Conn) {
 }
 
 type processStdio struct {
-	stdin, stdout, stderr *os.File // parent ends
+	stdin, stdout, stderr *os.File // parent ends (TTY mode: stdin is pty)
+	pty                   *os.File // PTY master in TTY mode
+}
+
+func winsize(rows, cols int) *pty.Winsize {
+	if rows <= 0 || cols <= 0 {
+		rows, cols = 24, 80
+	}
+	return &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}
+}
+
+// startTTYProcess starts argv on a new PTY, as session leader with the PTY
+// as its controlling terminal (so its process group ID is also the session
+// ID).
+func startTTYProcess(argv []string, dir string, env map[string]string, tty *protocol.ExecTTY) (*exec.Cmd, *processStdio, error) {
+	path, err := lookPathIn(argv[0], env["PATH"], dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if tty.Term != "" {
+		env = config.Merge(env, map[string]string{"TERM": tty.Term})
+	}
+	environ := make([]string, 0, len(env))
+	for k, v := range env {
+		environ = append(environ, k+"="+v)
+	}
+	cmd := &exec.Cmd{Path: path, Args: argv, Env: environ, Dir: dir}
+	ptmx, err := pty.StartWithAttrs(cmd, winsize(tty.Rows, tty.Cols), &syscall.SysProcAttr{Setsid: true, Setctty: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	return cmd, &processStdio{stdin: ptmx, pty: ptmx}, nil
 }
 
 // startProcess starts argv in its own process group. argv[0] is resolved

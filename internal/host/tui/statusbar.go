@@ -9,6 +9,7 @@ import (
 // StatusBar renders the status bar at the bottom of the terminal
 type StatusBar struct {
 	containerName string
+	state         string // instance state; shown unless "ready"
 	ports         []PortMapping
 	logs          []string
 	expanded      bool
@@ -32,6 +33,19 @@ func (s *StatusBar) SetSize(width, height int) {
 // SetPorts updates the list of port mappings
 func (s *StatusBar) SetPorts(ports []PortMapping) {
 	s.ports = ports
+}
+
+// SetState updates the instance state shown next to the container name.
+func (s *StatusBar) SetState(state string) {
+	s.state = state
+}
+
+// title is the container name plus the instance state unless it is ready.
+func (s *StatusBar) title() string {
+	if s.state == "" || s.state == "ready" {
+		return s.containerName
+	}
+	return s.containerName + " [" + s.state + "...]"
 }
 
 // SetLogs updates the stored log lines
@@ -90,7 +104,7 @@ func (s *StatusBar) View() string {
 
 func (s *StatusBar) renderCollapsed() string {
 	// Build the status line content
-	left := s.containerName
+	left := s.title()
 	right := "Ctrl+G: help"
 
 	// Build ports section
@@ -146,7 +160,7 @@ func (s *StatusBar) renderExpanded() string {
 	var lines []string
 
 	// Header
-	header := fmt.Sprintf(" Forwarded Ports ─ %s ", s.containerName)
+	header := fmt.Sprintf(" Forwarded Ports ─ %s ", s.title())
 	headerLine := s.buildBoxLine(header, '─')
 	lines = append(lines, ExpandedPanelStyle.Width(s.width).Render(headerLine))
 

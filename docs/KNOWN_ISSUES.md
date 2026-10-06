@@ -16,19 +16,18 @@ This document tracks known limitations and potential issues with existing functi
 
 ## Command Execution
 
-### `docker exec` fallback can leave processes behind
+### `dworm exec --no-bridge` can leave processes behind
 
-**Issue**: When no `dworm up` is running for the workspace, or when stdin and
-stdout are a terminal, `dworm exec` runs the command through `docker exec`.
-Killing the `docker exec` client does not signal or kill the process inside the
-container. `dworm exec` forwards SIGINT/SIGTERM to the docker CLI, but if dworm
-itself is killed (e.g. SIGKILL), the only remaining cleanup path is stdin EOF,
-which only works for processes that exit on EOF.
+**Issue**: `--no-bridge` is the only remaining `docker exec` path. Killing the
+`docker exec` client does not signal or kill the process inside the container.
+`dworm exec` forwards SIGINT/SIGTERM to the docker CLI, but if dworm itself is
+killed (e.g. SIGKILL), the only remaining cleanup path is stdin EOF, which only
+works for processes that exit on EOF.
 
 **Current behavior**: Processes that ignore stdin EOF can survive their caller
-on the `docker exec` path. With a running `dworm up`, non-TTY `dworm exec` and
-exec-socket clients run over the bridge instead, and the endpoint terminates the
-process group when the caller disconnects.
+on the `--no-bridge` path. Everything else (`dworm exec`, `dworm shell`, the TUI,
+socket clients) runs over the instance, whose endpoint terminates the process
+group, or hangs up the TTY session, when the caller disconnects.
 
 ### Raw exec clients: disconnect detection is Linux-only
 

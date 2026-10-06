@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -271,5 +272,106 @@ func TestExecKillsProcessGroupsOnShutdown(t *testing.T) {
 	_, reply := f.start(protocol.ExecRequest{Version: 1, Argv: []string{"true"}})
 	if reply.OK {
 		t.Fatal("exec accepted after shutdown")
+	}
+}
+
+func (f *execFixture) startTTY(script string) net.Conn {
+	f.t.Helper()
+	stream, reply := f.start(protocol.ExecRequest{
+		Version: 1, Argv: []string{"sh", "-c", script}, ID: "tty",
+		TTY: &protocol.ExecTTY{Rows: 24, Cols: 80, Term: "xterm-test"},
+	})
+	if !reply.OK {
+		f.t.Fatalf("tty exec rejected: %s", reply.Error)
+	}
+	return stream
+}
+
+// readUntil reads stdout frames until the output contains want.
+func readUntil(t *testing.T, stream net.Conn, want string) string {
+	t.Helper()
+	stream.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var out string
+	for !strings.Contains(out, want) {
+		frameType, payload, err := protocol.ReadFrame(stream)
+		if err != nil {
+			t.Fatalf("waiting for %q: %v (output %q)", want, err, out)
+		}
+		if frameType != protocol.FrameStdout {
+			t.Fatalf("unexpected frame type %d in TTY mode (output %q)", frameType, out)
+		}
+		out += string(payload)
+	}
+	return out
+}
+
+func waitSessionGone(t *testing.T, sid int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for sessionAlive(sid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("session %d still alive after %v: %v", sid, within, sessionMembers(sid))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestExecTTYResizeAndTerm(t *testing.T) {
+	f := newExecFixture(t)
+	stream := f.startTTY(`stty size; read x; stty size; echo "term=$TERM"; test -t 0 && test -t 2 && echo tty-ok`)
+	readUntil(t, stream, "24 80")
+	protocol.WriteJSONFrame(stream, protocol.FrameResize, protocol.ExecResize{Rows: 40, Cols: 100})
+	protocol.WriteFrame(stream, protocol.FrameStdin, []byte("\r"))
+	result := collect(t, stream)
+	for _, want := range []string{"40 100", "term=xterm-test", "tty-ok"} {
+		if !strings.Contains(result.stdout, want) {
+			t.Fatalf("output %q lacks %q", result.stdout, want)
+		}
+	}
+	if result.stderr != "" || result.exit.Code != 0 {
+		t.Fatalf("result = %+v; want no stderr frames and exit 0", result)
+	}
+}
+
+func TestExecTTYCtrlCInterrupts(t *testing.T) {
+	f := newExecFixture(t)
+	stream := f.startTTY(`trap "echo got-INT; exit 7" INT; echo ready; while :; do sleep 0.05; done`)
+	readUntil(t, stream, "ready")
+	protocol.WriteFrame(stream, protocol.FrameStdin, []byte{0x03})
+	result := collect(t, stream)
+	if !strings.Contains(result.stdout, "got-INT") || result.exit.Code != 7 {
+		t.Fatalf("result = %+v; want the INT trap and exit 7", result)
+	}
+}
+
+func TestExecTTYDisconnectHangsUpSession(t *testing.T) {
+	for name, script := range map[string]string{
+		"hangup first":     `trap "echo hup > $MARKER; exit 0" HUP; echo "pid=$$."; while :; do sleep 0.05; done`,
+		"ignores HUP+TERM": `trap "" HUP TERM; echo "pid=$$."; while :; do sleep 0.05; done`,
+		// Job control puts the background job in its own process group of
+		// the same session.
+		"job control": `set -m; sleep 1000 & echo "pid=$$."; wait`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newExecFixture(t)
+			marker := filepath.Join(t.TempDir(), "hup")
+			t.Setenv("MARKER", marker)
+			stream := f.startTTY(script)
+			out := readUntil(t, stream, ".")
+			pid, err := strconv.Atoi(out[strings.Index(out, "pid=")+4 : strings.Index(out, ".")])
+			if err != nil {
+				t.Fatalf("parse pid from %q: %v", out, err)
+			}
+			if !sessionAlive(pid) {
+				t.Fatal("session not running")
+			}
+			stream.Close()
+			waitSessionGone(t, pid, 2*f.server.execs.grace+2*time.Second)
+			if name == "hangup first" {
+				if data, _ := os.ReadFile(marker); strings.TrimSpace(string(data)) != "hup" {
+					t.Fatalf("SIGHUP was not delivered first (marker %q)", data)
+				}
+			}
+		})
 	}
 }

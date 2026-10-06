@@ -2,15 +2,16 @@ package tui
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/creack/pty"
+	"github.com/mpm/dworm/internal/host"
 	"github.com/mpm/dworm/internal/protocol"
 	"golang.org/x/term"
 )
@@ -37,52 +38,52 @@ const (
 	exitAltScreen     = csi + "?1049l"
 )
 
+// Config describes an interactive shell of a workspace instance.
+type Config struct {
+	SocketPath    string   // the instance socket
+	ContainerName string   // shown in the status bar
+	Argv          []string // shell command
+}
+
 // Model manages the TUI session
 type Model struct {
-	containerID   string
-	containerName string
-	workDir       string
-	envVars       map[string]string
+	cfg Config
 
 	statusBar     *StatusBar
-	portUpdateCh  <-chan []PortMapping
-	logUpdateCh   <-chan struct{}
-	failureCh     <-chan error
 	logBuffer     *LogBuffer
 	outputMu      sync.Mutex
 	output        io.Writer
-	ptmx          *os.File
 	origTermState *term.State
 	doneCh        chan struct{}
 	width         int
 	height        int
 	ansiPending   []byte
+
+	sessionMu sync.Mutex
+	session   *host.ExecSession // nil while reconnecting
+	state     string            // last instance state; guarded by sessionMu
+	readyCh   chan struct{}     // signalled when the instance becomes ready
+	quitCh    chan struct{}     // closed on SIGTERM/SIGHUP or when the instance stops
+	quitOnce  sync.Once
 }
 
-// New creates a new TUI model
-func New(containerID, containerName, workDir string, envVars map[string]string) *Model {
-	return &Model{
-		containerID:   containerID,
-		containerName: containerName,
-		workDir:       workDir,
-		envVars:       envVars,
-		doneCh:        make(chan struct{}),
-	}
-}
-
-// Run starts the TUI session and blocks until it exits.
-// logBuffer and logUpdateCh may be nil if log routing is not enabled.
-func Run(containerID, containerName, workDir string, envVars map[string]string, portUpdateCh <-chan []PortMapping, logBuffer *LogBuffer, logUpdateCh <-chan struct{}, failureCh <-chan error) error {
-	// Check if we have a TTY
+// Run opens the shell over the instance socket and blocks until it exits.
+// On a terminal it runs on a PTY in the container below a status bar with
+// the forwarded ports, instance state, and logs; when the bridge is lost the
+// status bar shows the reconnect and a new shell starts once the instance is
+// ready again. Without a terminal the shell runs as a plain framed exec. A
+// non-zero exit status is returned as *host.ExitError.
+func Run(cfg Config) error {
 	if !IsTerminal(int(os.Stdin.Fd())) || !IsTerminal(int(os.Stdout.Fd())) {
-		return runFallback(containerID, containerName, workDir, envVars, failureCh)
+		return runFallback(cfg)
 	}
-
-	m := New(containerID, containerName, workDir, envVars)
-	m.portUpdateCh = portUpdateCh
-	m.logBuffer = logBuffer
-	m.logUpdateCh = logUpdateCh
-	m.failureCh = failureCh
+	m := &Model{
+		cfg:     cfg,
+		doneCh:  make(chan struct{}),
+		readyCh: make(chan struct{}, 1),
+		quitCh:  make(chan struct{}),
+		state:   host.StateReady,
+	}
 	return m.run()
 }
 
@@ -96,167 +97,214 @@ func (m *Model) run() error {
 	m.height = height
 	m.output = os.Stdout
 
+	events, err := host.SubscribeEvents(m.cfg.SocketPath, 100, true)
+	if err != nil {
+		return fmt.Errorf("subscribe to instance events: %w", err)
+	}
+	defer events.Close()
+
 	// Create status bar
-	m.statusBar = NewStatusBar(m.containerName)
+	m.statusBar = NewStatusBar(m.cfg.ContainerName)
 	m.statusBar.SetSize(width, height)
+	var logUpdateCh <-chan struct{}
+	m.logBuffer, logUpdateCh = NewLogBuffer(100)
+	portCh := make(chan []PortMapping, 10)
+	stateCh := make(chan string, 10)
+	go m.readEvents(events, portCh, stateCh)
+
+	session, err := m.startSession()
+	if err != nil {
+		return err
+	}
 
 	// Put terminal in raw mode
 	m.origTermState, err = term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
+		session.Close()
 		return fmt.Errorf("failed to set raw mode: %w", err)
 	}
 	defer m.restore()
 	m.writeString(enterAltScreen)
 
-	// Build docker exec command
-	cmd := m.buildDockerCommand()
-
-	// Calculate shell height (leave room for status bar)
-	shellHeight := calculateShellHeight(height, m.statusBar.Height())
-
-	// Start with PTY
-	m.ptmx, err = pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(shellHeight),
-		Cols: uint16(width),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to start PTY: %w", err)
-	}
-	defer m.ptmx.Close()
-
 	// Set up scroll region (leave bottom row(s) for status bar)
+	shellHeight := calculateShellHeight(height, m.statusBar.Height())
 	m.writeString(setScrollRegion(1, shellHeight))
 	defer m.writeString(resetScrollRegion)
 
 	// Clear the entire visible area
 	m.clearScreen(shellHeight, height)
-
-	// Load any pre-existing log lines into the status bar
-	if m.logBuffer != nil {
-		m.statusBar.SetLogs(m.logBuffer.Lines())
-	}
-
-	// Initial status bar render
 	m.renderStatusBar()
 
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
 
-	// Start goroutines
-	errCh := make(chan error, 3)
+	go m.handleInput()
+	go m.handleEvents(sigCh, portCh, stateCh, logUpdateCh)
+	defer close(m.doneCh)
 
-	// Output goroutine: PTY -> terminal
-	go func() {
-		m.copyOutput()
-		errCh <- nil
-	}()
-
-	// Input goroutine: terminal -> PTY
-	go func() {
-		m.handleInput()
-		errCh <- nil
-	}()
-
-	// Signal and port update handler
-	go func() {
-		m.handleEvents(sigCh)
-		errCh <- nil
-	}()
-
-	// Wait for the shell or transport to exit.
-	cmdErr, failureErr := waitForCommand(cmd, m.failureCh)
-
-	// Signal done to all goroutines
-	close(m.doneCh)
-
-	// Clear status bar before exit
-	m.clearStatusBar()
-	if failureErr != nil {
-		return failureErr
-	}
-
-	if cmdErr != nil {
-		if exitErr, ok := cmdErr.(*exec.ExitError); ok {
-			return fmt.Errorf("exit %d", exitErr.ExitCode())
-		}
-		return cmdErr
-	}
-
-	return nil
-}
-
-func (m *Model) buildDockerCommand() *exec.Cmd {
-	args := []string{"exec", "-it"}
-
-	if m.workDir != "" {
-		args = append(args, "-w", m.workDir)
-	}
-
-	for key, value := range m.envVars {
-		args = append(args, "-e", key+"="+value)
-	}
-
-	args = append(args, m.containerID)
-	args = append(args, protocol.EnvironmentCommand(m.envVars, true, []string{"/bin/bash"})...)
-
-	return exec.Command("docker", args...)
-}
-
-func waitForCommand(cmd *exec.Cmd, failureCh <-chan error) (error, error) {
-	cmdResult := make(chan error, 1)
-	go func() {
-		cmdResult <- cmd.Wait()
-	}()
-
-	select {
-	case cmdErr := <-cmdResult:
-		return cmdErr, nil
-	case failureErr := <-failureCh:
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		return <-cmdResult, failureErr
-	}
-}
-
-func (m *Model) copyOutput() {
-	buf := make([]byte, 4096)
 	for {
+		exit := m.copyOutput(session)
+		session.Close()
+		m.setSession(nil)
+		if exit == nil || exit.Error != protocol.ExecErrorBridgeLost {
+			m.clearStatusBar()
+			if exit != nil && exit.Code != 0 {
+				return &host.ExitError{Code: exit.Code}
+			}
+			return nil
+		}
+		m.writeString("\r\n[dworm] Connection to the container lost, reconnecting...\r\n")
+		if session, err = m.waitAndRestart(); err != nil {
+			m.clearStatusBar()
+			return err
+		}
+	}
+}
+
+// startSession starts the shell on a PTY sized to the shell area.
+func (m *Model) startSession() (*host.ExecSession, error) {
+	termName := os.Getenv("TERM")
+	if termName == "" {
+		termName = "xterm-256color"
+	}
+	session, err := host.StartExec(m.cfg.SocketPath, protocol.ExecRequest{
+		Argv: m.cfg.Argv,
+		TTY:  &protocol.ExecTTY{Rows: calculateShellHeight(m.height, m.statusBar.Height()), Cols: m.width, Term: termName},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("start shell: %w", err)
+	}
+	m.setSession(session)
+	return session, nil
+}
+
+// waitAndRestart starts a new shell once the instance is ready again. The
+// instance may still report "ready" for a moment after the exec was lost,
+// so failed starts are retried.
+func (m *Model) waitAndRestart() (*host.ExecSession, error) {
+	for {
+		if m.currentState() == host.StateReady {
+			session, err := m.startSession()
+			if err == nil {
+				m.writeString("[dworm] Reconnected; this is a new shell.\r\n")
+				return session, nil
+			}
+			if errors.Is(err, host.ErrExecSocketUnavailable) {
+				return nil, err
+			}
+		}
+		select {
+		case <-m.readyCh:
+		case <-m.quitCh:
+			return nil, errors.New("the dworm instance stopped")
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (m *Model) setState(state string) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	m.state = state
+}
+
+func (m *Model) currentState() string {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.state
+}
+
+func (m *Model) setSession(s *host.ExecSession) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	m.session = s
+}
+
+func (m *Model) currentSession() *host.ExecSession {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.session
+}
+
+func (m *Model) quit() {
+	m.quitOnce.Do(func() { close(m.quitCh) })
+}
+
+// readEvents feeds instance events to the event handler.
+func (m *Model) readEvents(events *host.EventStream, portCh chan<- []PortMapping, stateCh chan<- string) {
+	send := func(f func()) bool {
 		select {
 		case <-m.doneCh:
-			return
+			return false
 		default:
+			f()
+			return true
 		}
-
-		n, err := m.ptmx.Read(buf)
+	}
+	for {
+		event, err := events.Next()
 		if err != nil {
+			send(func() { stateCh <- host.StateStopped })
 			return
 		}
-		if n > 0 {
-			if m.writePTYOutput(buf[:n]) {
+		ok := true
+		switch event.Type {
+		case host.EventPorts:
+			ports := make([]PortMapping, len(event.Ports))
+			for i, p := range event.Ports {
+				ports[i] = PortMapping{ContainerPort: p.Port, LocalPort: p.LocalPort}
+			}
+			ok = send(func() { portCh <- ports })
+		case host.EventLog:
+			fmt.Fprintf(m.logBuffer, "[%s] %s\n", event.Source, event.Message)
+		case host.EventState:
+			ok = send(func() { stateCh <- event.State })
+		}
+		if !ok {
+			return
+		}
+	}
+}
+
+// copyOutput writes the session's output until it exits. A broken socket
+// connection counts as a lost bridge unless the TUI is quitting.
+func (m *Model) copyOutput(session *host.ExecSession) *protocol.ExecExit {
+	for {
+		frameType, payload, err := session.ReadFrame()
+		if err != nil {
+			select {
+			case <-m.quitCh:
+				return nil
+			default:
+				return &protocol.ExecExit{Code: 255, Error: protocol.ExecErrorBridgeLost}
+			}
+		}
+		switch frameType {
+		case protocol.FrameStdout, protocol.FrameStderr:
+			if m.writePTYOutput(payload) {
 				m.renderStatusBar()
 			}
+		case protocol.FrameExit:
+			return host.ParseExit(payload)
 		}
 	}
 }
 
 func (m *Model) handleInput() {
-	buf := make([]byte, 1)
+	buf := make([]byte, 4096)
 	for {
+		n, err := os.Stdin.Read(buf)
 		select {
 		case <-m.doneCh:
 			return
 		default:
 		}
-
-		n, err := os.Stdin.Read(buf)
-		if err != nil || n == 0 {
-			continue
+		if err != nil {
+			return
 		}
-
-		b := buf[0]
+		input := buf[:n]
 
 		// Check if panel is expanded - any key closes it
 		if m.statusBar.IsExpanded() {
@@ -266,20 +314,23 @@ func (m *Model) handleInput() {
 			continue
 		}
 
-		// Check for Ctrl+G
-		if b == ctrlG {
+		// Ctrl+G toggles the panel; input after it is dropped.
+		toggle := bytes.IndexByte(input, ctrlG)
+		if toggle >= 0 {
+			input = input[:toggle]
+		}
+		if session := m.currentSession(); session != nil && len(input) > 0 {
+			session.Write(input)
+		}
+		if toggle >= 0 {
 			m.clearMaxStatusArea()
 			m.statusBar.ToggleExpanded()
 			m.resizeAndRender()
-			continue
 		}
-
-		// Forward to PTY
-		m.ptmx.Write(buf[:n])
 	}
 }
 
-func (m *Model) handleEvents(sigCh chan os.Signal) {
+func (m *Model) handleEvents(sigCh chan os.Signal, portCh <-chan []PortMapping, stateCh <-chan string, logUpdateCh <-chan struct{}) {
 	for {
 		select {
 		case <-m.doneCh:
@@ -289,24 +340,40 @@ func (m *Model) handleEvents(sigCh chan os.Signal) {
 			switch sig {
 			case syscall.SIGWINCH:
 				m.handleResize()
-			case syscall.SIGINT, syscall.SIGTERM:
-				if m.ptmx != nil {
-					m.ptmx.Write([]byte{0x03}) // Ctrl+C
+			case syscall.SIGINT:
+				if session := m.currentSession(); session != nil {
+					session.Write([]byte{0x03}) // Ctrl+C
+				}
+			case syscall.SIGTERM, syscall.SIGHUP:
+				// Leave: closing the session hangs up the shell.
+				m.quit()
+				if session := m.currentSession(); session != nil {
+					session.Close()
 				}
 			}
 
-		case ports := <-m.portUpdateCh:
-			if m.statusBar != nil {
-				m.statusBar.SetPorts(ports)
+		case ports := <-portCh:
+			m.statusBar.SetPorts(ports)
+			m.renderStatusBar()
+
+		case state := <-stateCh:
+			m.setState(state)
+			m.statusBar.SetState(state)
+			m.renderStatusBar()
+			switch state {
+			case host.StateReady:
+				select {
+				case m.readyCh <- struct{}{}:
+				default:
+				}
+			case host.StateStopping, host.StateStopped, host.StateFailed:
+				m.quit()
+			}
+
+		case <-logUpdateCh:
+			m.statusBar.SetLogs(m.logBuffer.Lines())
+			if m.statusBar.IsExpanded() {
 				m.renderStatusBar()
-			}
-
-		case <-m.logUpdateCh:
-			if m.statusBar != nil && m.logBuffer != nil {
-				m.statusBar.SetLogs(m.logBuffer.Lines())
-				if m.statusBar.IsExpanded() {
-					m.renderStatusBar()
-				}
 			}
 		}
 	}
@@ -329,11 +396,7 @@ func (m *Model) handleResize() {
 	shellHeight := calculateShellHeight(height, m.statusBar.Height())
 	m.updateTerminalLayout(shellHeight, height)
 
-	// Resize PTY
-	pty.Setsize(m.ptmx, &pty.Winsize{
-		Rows: uint16(shellHeight),
-		Cols: uint16(m.width),
-	})
+	m.resizeSession(shellHeight)
 
 	// Render status bar
 	m.renderStatusBar()
@@ -351,13 +414,16 @@ func (m *Model) resizeAndRender() {
 	shellHeight := calculateShellHeight(height, m.statusBar.Height())
 	m.updateTerminalLayout(shellHeight, height)
 
-	// Resize PTY
-	pty.Setsize(m.ptmx, &pty.Winsize{
-		Rows: uint16(shellHeight),
-		Cols: uint16(m.width),
-	})
+	m.resizeSession(shellHeight)
 
 	m.renderStatusBar()
+}
+
+// resizeSession resizes the shell's PTY in the container.
+func (m *Model) resizeSession(shellHeight int) {
+	if session := m.currentSession(); session != nil {
+		session.Resize(shellHeight, m.width)
+	}
 }
 
 func (m *Model) renderStatusBar() {

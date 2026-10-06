@@ -49,6 +49,22 @@ type ExecRequest struct {
 	Env     map[string]string `json:"env,omitempty"`
 	Mode    string            `json:"mode,omitempty"`
 	ID      string            `json:"id,omitempty"`
+	TTY     *ExecTTY          `json:"tty,omitempty"` // run on a new PTY (framed mode only)
+}
+
+// ExecTTY asks for a PTY of the given size. Term, when set, becomes TERM.
+// In TTY mode all output arrives as FrameStdout and FrameResize changes the
+// size; Ctrl-C and similar keys travel as stdin bytes.
+type ExecTTY struct {
+	Rows int    `json:"rows"`
+	Cols int    `json:"cols"`
+	Term string `json:"term,omitempty"`
+}
+
+// ExecResize is the payload of FrameResize.
+type ExecResize struct {
+	Rows int `json:"rows"`
+	Cols int `json:"cols"`
 }
 
 // ExecReply answers an ExecRequest. ExitCode is set when the process could not

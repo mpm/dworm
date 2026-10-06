@@ -313,6 +313,14 @@ func readRequest(reader *bufio.Reader) (*ControlRequest, error) {
 	if req.ID != "" {
 		return nil, errors.New("id is assigned by dworm")
 	}
+	if req.TTY != nil {
+		if req.Mode != protocol.ExecModeFramed {
+			return nil, errors.New("tty requires framed mode")
+		}
+		if req.TTY.Rows < 0 || req.TTY.Cols < 0 || req.TTY.Rows > 10000 || req.TTY.Cols > 10000 {
+			return nil, errors.New("invalid tty size")
+		}
+	}
 	if err := config.Validate(req.Env); err != nil {
 		return nil, err
 	}
@@ -459,7 +467,7 @@ func (s *ExecServer) handleExec(conn *net.UnixConn, reader *bufio.Reader, req *p
 		return
 	}
 	s.logger.Printf("[exec %s] Started %q (%s mode)", req.ID, req.Argv[0], mode)
-	s.publish(Event{Type: EventExecStarted, ID: req.ID, Argv: req.Argv})
+	s.publish(Event{Type: EventExecStarted, ID: req.ID, Argv: req.Argv, TTY: req.TTY != nil})
 	s.attach(1)
 
 	var exit *protocol.ExecExit

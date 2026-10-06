@@ -72,7 +72,7 @@ func (f *fakeExecEndpoint) handle(stream net.Conn) {
 		switch frameType {
 		case protocol.FrameStdin:
 			protocol.WriteFrame(stream, protocol.FrameStdout, payload)
-		case protocol.FrameSignal:
+		case protocol.FrameSignal, protocol.FrameResize:
 			protocol.WriteFrame(stream, protocol.FrameStdout, payload)
 		case protocol.FrameStdinEOF:
 			if !f.ignoreEOF {
@@ -268,6 +268,26 @@ func TestExecFramedDisconnectKills(t *testing.T) {
 	expectNotKilled(t, f.endpoint, 300*time.Millisecond)
 	conn.Close()
 	expectKilled(t, f.endpoint, 2*time.Second)
+}
+
+func TestExecTTYRequest(t *testing.T) {
+	f := newExecServerFixture(t, &fakeExecEndpoint{})
+	_, _, reply := f.dial(t, `{"version":1,"argv":["bash"],"tty":{"rows":24,"cols":80}}`)
+	if reply.OK || !strings.Contains(reply.Error, "tty requires framed mode") {
+		t.Fatalf("raw tty reply = %+v", reply)
+	}
+	conn, reader, reply := f.dial(t, `{"version":1,"argv":["bash"],"mode":"framed","tty":{"rows":24,"cols":80,"term":"xterm"}}`)
+	if !reply.OK {
+		t.Fatalf("framed tty reply = %+v", reply)
+	}
+	if tty := f.endpoint.requests[0].TTY; tty == nil || tty.Rows != 24 || tty.Cols != 80 || tty.Term != "xterm" {
+		t.Fatalf("bridge request tty = %+v", tty)
+	}
+	protocol.ReadFrame(reader) // stderr "err"
+	protocol.WriteJSONFrame(conn, protocol.FrameResize, protocol.ExecResize{Rows: 40, Cols: 100})
+	if frameType, payload, err := protocol.ReadFrame(reader); err != nil || frameType != protocol.FrameStdout || string(payload) != `{"rows":40,"cols":100}` {
+		t.Fatalf("resize did not reach the endpoint: %d %s %v", frameType, payload, err)
+	}
 }
 
 func TestExecFramedBridgeLost(t *testing.T) {

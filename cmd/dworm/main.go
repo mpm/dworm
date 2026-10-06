@@ -399,7 +399,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stdout, instanceSummary(state))
 		return nil
 	}
-	return runShellSession(state)
+	// The shell's exit status is not dworm up's.
+	var exitErr *host.ExitError
+	if err := runShellSession(state); err != nil && !errors.As(err, &exitErr) {
+		return err
+	}
+	return nil
 }
 
 // instanceSummary is the one-line summary of `dworm up -d`.
@@ -418,41 +423,15 @@ func instanceSummary(state *host.InstanceState) string {
 	return fmt.Sprintf("dworm instance ready: container %s, pid %d, ports: %s", state.ContainerName, state.PID, ports)
 }
 
-// runShellSession opens the interactive TUI shell of a ready instance.
+// runShellSession opens the interactive shell of a ready instance: the TUI
+// with status bar on a terminal, a plain framed exec otherwise.
 func runShellSession(state *host.InstanceState) error {
-	events, err := host.SubscribeEvents(state.ExecSocket, 100, true)
-	if err != nil {
-		return fmt.Errorf("subscribe to instance events: %w", err)
-	}
-	defer events.Close()
-	portCh := make(chan []tui.PortMapping, 10)
-	logBuffer, logUpdateCh := tui.NewLogBuffer(100)
-	go func() {
-		for {
-			event, err := events.Next()
-			if err != nil {
-				return
-			}
-			switch event.Type {
-			case host.EventPorts:
-				ports := make([]tui.PortMapping, len(event.Ports))
-				for i, p := range event.Ports {
-					ports[i] = tui.PortMapping{ContainerPort: p.Port, LocalPort: p.LocalPort}
-				}
-				select {
-				case portCh <- ports:
-				default:
-				}
-			case host.EventLog:
-				fmt.Fprintf(logBuffer, "[%s] %s\n", event.Source, event.Message)
-			}
-		}
-	}()
-	shellErr := tui.Run(state.ContainerID, state.ContainerName, state.WorkspaceFolder, nil, portCh, logBuffer, logUpdateCh, nil)
-	if shellErr != nil && !strings.HasPrefix(shellErr.Error(), "exit ") {
-		return shellErr
-	}
-	return nil
+	return tui.Run(tui.Config{
+		SocketPath:    state.ExecSocket,
+		ContainerName: state.ContainerName,
+		// The launcher sets up the environment reload hook for Bash.
+		Argv: protocol.EnvironmentCommand(map[string]string{}, true, []string{"/bin/bash"}),
+	})
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
@@ -508,7 +487,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return host.ExecShell(state.ContainerID, state.WorkspaceFolder, nil)
+	return runShellSession(state)
 }
 
 func runExec(cmd *cobra.Command, args []string) error {
@@ -519,20 +498,13 @@ func runExec(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The instance's endpoint terminates the process (group or TTY session)
+	// when this client goes away.
+	req := protocol.ExecRequest{Argv: args, Cwd: execDir, Env: parseEnvVars()}
 	if host.StdioIsTerminal() {
-		workDir := execDir
-		if workDir == "" {
-			workDir = state.WorkspaceFolder
-		}
-		return host.ExecCommand(state.ContainerID, workDir, parseEnvVars(), args)
+		return host.ExecTTY(state.ExecSocket, req)
 	}
-	// The instance's endpoint terminates the process group when this client
-	// goes away.
-	return host.ExecViaSocket(state.ExecSocket, protocol.ExecRequest{
-		Argv: args,
-		Cwd:  execDir,
-		Env:  parseEnvVars(),
-	}, os.Stdin, os.Stdout, os.Stderr)
+	return host.ExecViaSocket(state.ExecSocket, req, os.Stdin, os.Stdout, os.Stderr)
 }
 
 // runExecNoBridge runs the command through plain `docker exec`.
