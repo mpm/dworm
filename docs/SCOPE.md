@@ -35,8 +35,11 @@ Protocol: Length-prefixed JSON messages or a simple RPC protocol over the pipe, 
 - **Git config**: Transmit `user.name`, `user.email`, and optionally `user.signingkey` to be written to `~/.gitconfig` inside the container
 
 ### Operating Modes
-1. **Shell mode** (default): Opens an interactive shell in the container with all forwarding active
-2. **Daemon mode** (`--daemon`): Sits in foreground, prints port/config changes to stdout, useful for integration with other tools or editors
+A background instance per workspace owns the bridge; every command is a client of it (since v0.8.0).
+1. **Shell mode** (default): Opens an interactive shell in the container with all forwarding active;
+   leaving it leaves the instance running
+2. **Detached** (`up -d`) or **foreground** (`up --foreground`, formerly `--daemon`): only the
+   instance, for integration with other tools, editors, or systemd
 
 ## CLI Interface (draft)
 

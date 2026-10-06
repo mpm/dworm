@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Exec streams carry processes started through a running `dworm up`.
+// Exec streams carry processes started through a running instance.
 //
 // On the bridge, the host opens a stream, writes StreamTypeExec, then a
 // length-prefixed ExecRequest (WriteJSONMessage). The endpoint answers with a

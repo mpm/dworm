@@ -45,7 +45,7 @@ type UpStatus struct {
 	DwormVersion      string      `json:"dworm_version,omitempty"`
 }
 
-// RunningInstance returns the state of the `dworm up` holding the workspace
+// RunningInstance returns the state file of the instance holding the workspace
 // lock, or nil when none is running.
 func RunningInstance(workspacePath string) (*InstanceState, error) {
 	paths := InstancePathsFor(workspacePath)
@@ -62,7 +62,7 @@ func RunningInstance(workspacePath string) (*InstanceState, error) {
 }
 
 // WorkspaceFolder returns the in-container workspace folder: the one reported
-// by a running `dworm up` for this container, else ResolveWorkspaceFolder.
+// by a running instance for this container, else ResolveWorkspaceFolder.
 func WorkspaceFolder(containerID, workspacePath string) string {
 	if state, _ := RunningInstance(workspacePath); state != nil && state.WorkspaceFolder != "" && state.ContainerID == containerID {
 		return state.WorkspaceFolder

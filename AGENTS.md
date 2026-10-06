@@ -435,7 +435,10 @@ E2E scripts in `test/e2e/`:
 - `test-exec-stdio.sh` - `dworm exec` stdin/stdout passthrough, stdin EOF, exit codes, working directory
   (via the instance and with `--no-bridge`)
 - `test-exec-socket.sh` - Raw socket client (python3), `dworm exec` via the socket, no processes left
-  after killed callers or `up` shutdown (`pgrep` in the container)
+  after killed callers or instance shutdown (`pgrep` in the container)
+- `test-instance.sh` - `up -d` (and a second one returning at once), `dworm shell` on a PTY (python3
+  pty driver) leaving the instance running, `logs -f --json` exec events, SIGKILLed TTY `dworm exec`
+  (via `script`) leaves no process, `stop` keeps the container, cold `exec` starts everything, `down`
 - `test-daemon.sh` - `up --foreground` single instance (exit 3), state file, `status --json` (state, mode,
   reconnects, clients), SIGTERM exit 0, reconnect after `docker restart` (same PID, `reconnects` 1,
   state `ready`, exec works)

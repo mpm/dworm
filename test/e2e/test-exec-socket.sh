@@ -49,15 +49,17 @@ DAEMON_LOG="$WORK_DIR/daemon.log"
 (cd "$DEVCONTAINER_PATH" && exec "$DWORM" up --foreground 2>"$DAEMON_LOG") &
 DWORM_PID=$!
 
+# The socket exists before the instance is ready; exec requests need "ready".
 SOCKET=""
 for ((i = 0; i < 120; i++)); do
-    SOCKET=$(cd "$DEVCONTAINER_PATH" && "$DWORM" status --json 2>/dev/null |
-        python3 -c 'import json, sys; print(json.load(sys.stdin)["up"].get("exec_socket") or "")' || true)
-    [[ -n "$SOCKET" ]] && break
+    if [[ "$(status_field up.state)" == '"ready"' ]]; then
+        SOCKET=$(status_field up.exec_socket | tr -d '"')
+        break
+    fi
     sleep 1
 done
 if [[ -z "$SOCKET" ]]; then
-    log_fail "status --json never reported exec_socket"
+    log_fail "status --json never reported a ready instance with exec_socket"
     cat "$DAEMON_LOG"
     exit 1
 fi

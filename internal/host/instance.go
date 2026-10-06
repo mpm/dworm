@@ -16,7 +16,7 @@ import (
 // ErrAlreadyRunning is returned when another instance holds the workspace lock.
 var ErrAlreadyRunning = errors.New("a dworm instance is already running for this workspace")
 
-// InstancePaths are the per-workspace runtime files of a `dworm up` process.
+// InstancePaths are the per-workspace runtime files of an instance.
 // They are named after a short hash of the absolute workspace path, which keeps
 // the socket path well below the 108-byte unix socket limit.
 type InstancePaths struct {
@@ -69,7 +69,7 @@ func ensureRuntimeDir(dir string) error {
 	return nil
 }
 
-// InstanceLock is the exclusive per-workspace lock held by `dworm up`. The
+// InstanceLock is the exclusive per-workspace lock held by an instance. The
 // kernel releases it when the process exits, so a crash leaves no stale lock.
 type InstanceLock struct {
 	Paths InstancePaths
@@ -88,7 +88,7 @@ func AcquireInstanceLock(workspacePath string) (*InstanceLock, error) {
 		return nil, fmt.Errorf("open instance lock: %w", err)
 	}
 	// Status probes hold a shared lock for an instant; retry briefly so a
-	// concurrent `dworm status` cannot make `dworm up` fail.
+	// concurrent `dworm status` cannot make an instance fail to start.
 	for attempt := 0; ; attempt++ {
 		err = lockFile(file, true)
 		if err == nil {
@@ -113,7 +113,7 @@ func (l *InstanceLock) Release() {
 	l.file.Close()
 }
 
-// InstanceRunning reports whether a `dworm up` currently holds the lock.
+// InstanceRunning reports whether an instance currently holds the lock.
 func InstanceRunning(paths InstancePaths) (bool, error) {
 	file, err := os.Open(paths.Lock)
 	if errors.Is(err, os.ErrNotExist) {

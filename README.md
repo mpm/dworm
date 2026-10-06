@@ -11,9 +11,11 @@ A CLI tool that bridges your host machine and devcontainer environments, providi
 - **Git Credential Forwarding**: Push/pull to private repos using host's credential helpers
 - **Environment Variable Injection**: Pass environment variables from host to container
 - **Project Environment Configuration**: Load `.dworm.env` and run host commands to generate and periodically refresh variables across dworm shells
-- **Shell Access**: Interactive shell with all forwarding active
+- **Shell Access**: Interactive shell with all forwarding active, on a PTY in the container
 - **One-shot Command Execution**: Run a command in the container and exit
-- **Daemon Mode**: Run in foreground for integration with other tools
+- **One Background Instance per Workspace**: Shared by all commands; it reconnects by itself when
+  the container restarts
+- **Integration with Other Tools**: Unix socket for running processes, `status --json`, event stream
 
 ## Requirements
 
@@ -85,12 +87,12 @@ the `self-update` command. The installer still supports older two-binary archive
 ### Start a devcontainer with port forwarding
 
 ```bash
-# Start container and open shell (default)
-# Run from a directory containing .devcontainer/devcontainer.json
+# Start container and bridge, then open a shell (run from a directory
+# containing .devcontainer/devcontainer.json)
 dworm up
 
-# Start in daemon mode (no shell, stays in foreground)
-dworm up --daemon
+# Only make sure everything runs, then return
+dworm up -d
 
 # With environment variables
 dworm up --env API_KEY=secret --env DEBUG=true
@@ -100,21 +102,54 @@ dworm up --config /path/to/devcontainer.json
 dworm up -c .devcontainer/custom.json
 ```
 
-### One `dworm up` per workspace and running under systemd
+### The workspace instance
 
-Only one `dworm up` can run per workspace. A second one exits immediately with
-**exit code 3** and names the running process; use `dworm shell` or `dworm exec`
-alongside it instead. The lock is an `flock` on a file in
-`$XDG_RUNTIME_DIR/dworm/` (or `/tmp/dworm-$UID/`, mode `0700`), so it is released
-automatically if dworm crashes.
+One long-lived background **instance** per workspace owns the bridge to the
+container: port forwarding, agent and credential forwarding, the project
+environment, and a unix socket for running processes. Every dworm command is a
+client: it makes sure the instance runs (starting it in the background if
+needed, which runs `devcontainer up` and so also starts a stopped container) and
+then talks to it. Clients come and go; the instance stays until it is stopped.
 
-`dworm up --daemon` is suitable for a `Type=simple` systemd unit:
+- `dworm up` ensures the instance and, on a terminal, opens the shell. Leaving
+  the shell leaves the instance (and your forwarded ports) running. `dworm up -d`,
+  or `dworm up` without a terminal, waits until the instance is ready, prints a
+  one-line summary, and exits 0, also when it was already running.
+- `dworm shell` and `dworm exec` ensure it too (`--no-start` makes them fail
+  instead of starting a stopped container).
+- `dworm stop` stops the instance and leaves the container running;
+  `dworm down` stops both. `dworm remove` and `dworm rebuild` stop it first.
+- While the instance starts, clients show the `devcontainer up` output on a
+  terminal (or with `-v`); `--timeout` (default 15m) bounds the wait.
+- `-e`/`-c`/`--bind` on `dworm up`/`dworm shell` only apply when they start the
+  instance. If it already runs with other `-e` values you get a warning; run
+  `dworm stop` first. `dworm exec -e` applies to that command only.
+- Clients only talk to an instance of the same dworm version; after an upgrade,
+  run `dworm stop` once.
 
-- it stays in the foreground until stopped;
-- SIGTERM/SIGINT closes the bridge and its forwarders and exits 0, leaving the
-  container running (`dworm down` stops it);
-- if the bridge breaks (endpoint dies, container stops or restarts) it exits
-  non-zero, so `Restart=on-failure` reconnects it;
+If the bridge breaks (the endpoint dies, the container restarts), the instance
+reconnects by itself: it re-injects the endpoint and re-sends the environment.
+While the container is down it retries for two minutes (enough for
+`docker restart`), then stops. During a reconnect, forwarded ports refuse new
+connections and running processes are lost (`dworm exec` exits with 255 and
+prints `dworm: bridge lost`); the shell's status bar shows `reconnecting...` and
+a new shell starts once the instance is ready again.
+
+The instance's files live in `$XDG_RUNTIME_DIR/dworm/` (or `/tmp/dworm-$UID/`,
+mode `0700`), named after a hash of the workspace path: an `flock` lock, a state
+file, the socket, and the log of a background instance (5 MiB, rotated once).
+`dworm logs` shows recent log lines, `dworm logs -f` follows them.
+
+### Running under systemd
+
+The instance can also run in the foreground with `dworm up --foreground`
+(`--daemon` is a deprecated alias), e.g. as a `Type=simple` systemd unit:
+
+- it exits immediately with **exit code 3** if an instance already runs;
+- SIGTERM/SIGINT (or `dworm stop`) shuts it down cleanly and exits 0, leaving
+  the container running (`dworm down` stops it);
+- it reconnects by itself and exits non-zero only on unrecoverable errors (e.g.
+  `devcontainer up` failed), so `Restart=on-failure` stays meaningful;
 - when stderr is not a terminal, logs use plain `\n` line endings, one line per
   event.
 
@@ -126,19 +161,23 @@ Description=dworm bridge for %i
 [Service]
 Type=simple
 WorkingDirectory=%h/projects/%i
-ExecStart=%h/.local/bin/dworm up --daemon
+ExecStart=%h/.local/bin/dworm up --foreground
 Restart=on-failure
 RestartSec=5
-# Optional: don't retry while another dworm up holds the workspace
+# Optional: don't retry while another instance holds the workspace
 RestartPreventExitStatus=3
 
 [Install]
 WantedBy=default.target
 ```
 
-While running, `dworm up` keeps a state file (`<hash>.json`, next to the lock)
-with its PID, container, workspace folder, connection state, and forwarded ports.
-`dworm status --json` combines it with the container's state:
+A unit is optional: `dworm up -d` starts the instance in the background on
+demand, and every other command does the same.
+
+### Status
+
+`dworm status --json` combines the container's state with the instance's live
+state:
 
 ```json
 {
@@ -146,27 +185,39 @@ with its PID, container, workspace folder, connection state, and forwarded ports
   "container": {"id": "2e7d99a944c1", "name": "app-1", "running": true,
                 "remote_user": "vscode", "workspace_folder": "/workspaces/app"},
   "up": {"running": true, "pid": 751026, "started_at": "2026-10-06T13:15:58Z",
-         "endpoint_connected": true,
-         "ports": [{"port": 3000, "address": "127.0.0.1", "local_port": 3000}]},
-  "dworm_version": "v0.7.0"
+         "state": "ready", "mode": "detached", "endpoint_connected": true,
+         "reconnects": 0, "clients": 1,
+         "ports": [{"port": 3000, "address": "127.0.0.1", "local_port": 3000}],
+         "exec_socket": "/run/user/1000/dworm/5497057b0012.sock",
+         "log_path": "/run/user/1000/dworm/5497057b0012.log",
+         "dworm_version": "v0.8.0"},
+  "dworm_version": "v0.8.0"
 }
 ```
 
 `container` is `null` when the workspace has no container, and `up.running` is
-true only while a `dworm up` holds the workspace lock. Both cases exit 0; non-zero
-exit codes mean dworm could not determine the status (e.g. Docker is unavailable).
+true only while an instance holds the workspace lock. `up.state` is `starting`,
+`connecting`, `ready`, `reconnecting`, `stopping`, `stopped`, or `failed`.
+`clients` counts attached exec sessions and event subscriptions. Both "no
+container" and "no instance" exit 0; non-zero exit codes mean dworm could not
+determine the status (e.g. Docker is unavailable).
 
-### Exec socket for other programs
+### The instance socket for other programs
 
-Each running `dworm up` listens on a unix socket (`exec_socket` in
-`dworm status --json`, mode `0600`, same user only). One connection runs one
-process in the container, with the published dworm environment:
+The instance listens on a unix socket (`exec_socket` in `dworm status --json`,
+mode `0600`, same user only). Each connection starts with one JSON request line
+and gets one JSON reply line; `op` selects what it does (without `op` it is an
+`exec`, as in v0.7.0):
 
 ```text
 → {"version":1, "argv":["opencode","acp"], "cwd":"/workspaces/app", "env":{"FOO":"bar"}, "mode":"raw"}
 ← {"ok":true,"id":"3f9a1c2b7d10"}            or  {"ok":false,"error":"…"}
+→ {"version":1, "op":"events", "history":20}  (then newline-delimited JSON events)
+→ {"version":1, "op":"status"}                ← {"ok":true,"status":{…}}
+→ {"version":1, "op":"stop"}
 ```
 
+An exec runs one process in the container with the published dworm environment.
 `cwd` defaults to the workspace folder and `env` overrides the dworm environment.
 In `raw` mode the connection is then a plain byte stream: your bytes are the
 process's stdin, half-closing the connection (`shutdown(SHUT_WR)`) is stdin EOF,
@@ -174,8 +225,26 @@ and you receive only its stdout. stderr goes to dworm's log as `[exec <id>]`
 lines. When the process exits and its stdout is drained, dworm closes the
 connection (raw mode has no exit code). Closing the connection before the
 process exits terminates its process group. `framed` mode (used by `dworm exec`)
-carries stdin, stdout, stderr, signals, and the exit status as frames; see
-`AGENTS.md`. Up to 32 processes can run concurrently per container.
+carries stdin, stdout, stderr, signals, window sizes, and the exit status as
+frames, and can run the process on a PTY (`"tty":{"rows":24,"cols":80}`); see
+`AGENTS.md`. Up to 32 processes can run concurrently per container. Before the
+instance is ready, exec requests get `{"ok":false,"error":"not ready","code":"not_ready"}`.
+
+The event stream starts with a snapshot (current state, ports, recent log lines)
+and continues with live events:
+
+```json
+{"t":"2026-10-07T10:00:00Z","type":"state","state":"reconnecting","reason":"bridge_lost"}
+{"t":"…","type":"ports","ports":[{"port":3000,"address":"127.0.0.1","local_port":3000}]}
+{"t":"…","type":"log","source":"endpoint","level":"info","message":"…"}
+{"t":"…","type":"exec_started","id":"…","argv":["opencode","acp"],"tty":false}
+{"t":"…","type":"exec_exited","id":"…","code":0,"signal":""}
+{"t":"…","type":"client","attached":2}
+```
+
+A subscriber that reads too slowly misses events and gets
+`{"type":"dropped","count":N}` instead; it never slows the instance down.
+`dworm logs -f --json` prints this stream.
 
 ### Project environment and host startup commands
 
@@ -234,46 +303,54 @@ Precedence (highest first):
 
 `dworm up` publishes a shared, private environment snapshot inside the container.
 Its shell, separate `dworm shell` sessions, and `dworm exec` all use this snapshot.
-An override passed to `dworm shell -e KEY=value` stays pinned in that session.
+An override passed to `dworm exec -e KEY=value` applies to that command only.
 Interactive Bash shells reload managed variables at each prompt, preserving the
 user's `.bashrc` and existing prompt hooks. Already-running programs and shell
 scripts retain their inherited environment; they must reload credentials themselves
 or be restarted. Direct `docker exec` invocations and container startup services
 do not automatically load dworm's environment.
 
-Refreshes run serially while the original host-side `dworm up` process is alive,
-including in `--daemon` mode (which remains in the foreground). Each successful
+Refreshes run serially while the workspace instance is running, in the
+background or in the foreground (`--foreground`). Each successful
 run replaces the previous command output, including removing omitted variables
 and falling back to lower-priority values. Initial command failure or invalid
 output aborts startup; later failures retain the last successful values and retry
-at the next interval. A separate `dworm shell` never starts another refresh loop.
-Configuration and `.dworm.env` are read once per `dworm up` invocation.
+at the next interval. Shells and commands never start another refresh loop.
+Configuration and `.dworm.env` are read once when the instance starts; run
+`dworm stop` to pick up changes.
 
 Snapshots are atomically written to `/tmp/dworm/environment.json` with mode `0600`
 in a `0700` directory. Generated values are not written to the workspace or logged
 by dworm; command stderr is forwarded as diagnostics. If the container remains
-running after dworm exits, shells can use the last snapshot, but refreshes stop.
+running after the instance stops, shells can use the last snapshot, but refreshes stop.
 
-When upgrading to v0.6.0 or later, install `dworm`, which includes its matching
-endpoints. To activate updated forwarding behavior, stop the old host-side dworm
-process and run `dworm up` again to inject the new
+When upgrading, install `dworm`, which includes its matching endpoints, and run
+`dworm stop` so the next command starts an instance that injects the new
 endpoint. Reopen existing shells to activate the environment reload hook.
 
 ### Other commands
 
 ```bash
-# Stop the container
+# Stop the instance, keep the container running
+dworm stop
+
+# Stop the instance and the container
 dworm down
 
-# Open a shell in a running container
+# Open a shell (TUI with status bar; Ctrl+G shows ports and logs)
 dworm shell
 
-# Run a command in a running container and exit
+# Run a command in the container and exit
 dworm exec -- npm test
 dworm exec -w /tmp -- ls          # explicit working directory
 printf 'data' | dworm exec -- cat # stdin/stdout are passed through byte for byte
+dworm exec --no-bridge -- ls      # plain docker exec, bypassing the instance
 
-# Show container, dworm up, and forwarded port status
+# Show the instance's log and events
+dworm logs
+dworm logs -f --json
+
+# Show container, instance, and forwarded port status
 dworm status
 dworm status --json   # machine-readable
 
@@ -285,35 +362,36 @@ dworm remove --force  # skip confirmation
 dworm rebuild
 ```
 
-While a `dworm up` runs for the workspace, `dworm exec` without a terminal runs
-the command over its existing bridge instead of a new `docker exec`. The endpoint
-then owns the process group: if the caller disappears (even via SIGKILL), the
-process group gets SIGTERM and, after 5 seconds, SIGKILL. Terminal sessions
-(`dworm exec -- bash` in a terminal) still use `docker exec -it`.
+`dworm exec` runs the command over the instance, so the endpoint owns the
+process: if the caller disappears (even via SIGKILL), its process group gets
+SIGTERM and, after 5 seconds, SIGKILL. On a terminal (`dworm exec -- bash`), the
+command runs on a PTY in the container and a disconnect hangs up the session
+(SIGHUP first). Only `--no-bridge` uses `docker exec`, which cannot clean up after
+a killed client.
 
 `dworm shell` and `dworm exec` start in the container's workspace folder (the
 in-container path of the project directory), unless `dworm exec --workdir/-w`
-selects another directory. `dworm exec` always forwards stdin, allocates a TTY
-only when stdin and stdout are both terminals, writes only the command's output to
+selects another directory. `dworm exec` always forwards stdin, uses a PTY only
+when stdin and stdout are both terminals, writes only the command's output to
 stdout, and exits with the command's exit status.
 
 ### Example workflow
 
 ```bash
-# Terminal 1: Start dworm from your project directory
-$ dworm up --daemon
-2024/01/09 22:39:03 Container started: myproject-dev
-2024/01/09 22:39:03 SSH agent forwarding enabled
-Forwarding localhost:3000 -> container:3000
-Forwarding localhost:5432 -> container:5432
+# Terminal 1: Start dworm from your project directory and work in the shell
+$ dworm up
+developer@container:~/workspace$ npm run dev
 
 # Terminal 2: Access your app
 $ curl http://localhost:3000
 Hello from container!
 
-# Terminal 3: Work in the container
-$ dworm shell
-developer@container:~$ npm run dev
+# Terminal 3: Another shell, or a one-off command; the forwarded ports stay
+# available when you leave either shell
+$ dworm exec -- npm test
+
+# Done for the day
+$ dworm down
 ```
 
 ### SSH agent forwarding
@@ -374,8 +452,9 @@ developer@container:~$ git push origin main
 1. **dworm** (host) loads project environment configuration, runs the configured host command, and then starts the devcontainer using the devcontainer CLI
 2. It injects **dworm_endpoint** binary into the container
 3. Host and endpoint communicate over stdin/stdout of `docker exec`; the same
-   bridge carries port tunnels, agent/credential forwarding, and `dworm exec`
-   processes
+   bridge carries port tunnels, agent/credential forwarding, endpoint logs, and
+   the processes of `dworm shell` and `dworm exec`. A background instance per
+   workspace owns the bridge and reconnects it when it breaks
 4. Endpoint scans `/proc/net/tcp` for listening ports and reports changes
 5. Host binds matching ports locally and tunnels traffic through the multiplexed connection
 6. The endpoint publishes a shared environment snapshot for dworm shells and commands; scheduled host-command runs replace that snapshot
@@ -446,8 +525,8 @@ Some E2E tests are conditional:
 
 ## Limitations
 
-- No automatic reconnection on disconnect (run `dworm up --daemon` under a
-  supervisor such as systemd with `Restart=on-failure`)
+- Processes running in the container do not survive a bridge reconnect, and
+  there is no way to reattach to a running process
 - Port range limited to 1024-20000
 - Linux containers only (amd64 and arm64 endpoints are embedded)
 
@@ -457,5 +536,5 @@ MIT
 
 ## Releases
 
-See the [v0.7.0 release notes](docs/releases/v0.7.0.md), earlier notes in
+See the [v0.8.0 release notes](docs/releases/v0.8.0.md), earlier notes in
 [docs/releases](docs/releases/), and the [maintainer release guide](docs/RELEASING.md).

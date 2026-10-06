@@ -7,8 +7,9 @@ GitHub Actions release workflow injects the pushed tag into the host binary.
 ## Prepare
 
 1. Choose a version. Use a minor release for new functionality; project environment
-   configuration shipped in v0.5.0, self-update and embedded endpoints in v0.6.0;
-   unattended-use features (daemon lock/state, `status --json`, exec socket) use **v0.7.0**.
+   configuration shipped in v0.5.0, self-update and embedded endpoints in v0.6.0,
+   unattended-use features (daemon lock/state, `status --json`, exec socket) in v0.7.0;
+   the background instance shared by all commands (CLI behaviour changes) is **v0.8.0**.
 2. Update the README and add user-facing notes at `docs/releases/vX.Y.Z.md`.
    Include any host/endpoint compatibility or upgrade instructions.
 3. Run the relevant checks:
@@ -18,6 +19,7 @@ GitHub Actions release workflow injects the pushed tag into the host binary.
    make build
    ./test/e2e/test-env-vars.sh
    ./test/e2e/test-project-env.sh
+   ./test/e2e/test-instance.sh
    git diff --check
    ```
 
@@ -31,12 +33,12 @@ pushing its version tag.
 
 ## Publish
 
-For the prepared v0.7.0 commit:
+For the prepared v0.8.0 commit:
 
 ```bash
-git tag -a v0.7.0 -m "v0.7.0"
+git tag -a v0.8.0 -m "v0.8.0"
 git push origin HEAD
-git push origin v0.7.0
+git push origin v0.8.0
 ```
 
 Use the repository's configured signing settings when creating tags.
@@ -114,3 +116,22 @@ not macOS runtime replacement validation.
   reconnected after `docker restart` (one restart), stopped as `inactive (dead)`
   with exit status 0 while the container kept running, and logged no carriage
   returns to journald.
+
+## v0.8.0 validation record
+
+- `go test ./...` (3 repeated runs) and `go vet ./...` passed on Linux amd64 (Go 1.27.1). The race
+  detector was not run: the validation host has no C compiler for cgo. Host cross-builds passed
+  for Linux arm64 and macOS amd64/arm64; macOS was not runtime-tested.
+- Unit tests run the instance against fake container/endpoint dependencies (socket before ready,
+  state sequence, stop, failure, reconnect with exit 255/`bridge lost`, refused tunnels,
+  `container_stopped`), concurrent `ensure` calls against the test binary re-executed as a
+  detached fake instance (one instance, all clients succeed), version mismatch, the event bus
+  (snapshot, history, drop markers), and TTY execs on real PTYs (resize, Ctrl-C, SIGHUP-first
+  hangup of the whole session).
+- The full Docker suite passed 10 tests (port forwarding, environment variables, exec stdio via the
+  instance and `--no-bridge`, exec socket, foreground lifecycle with reconnect after
+  `docker restart`, the instance test, project environment, embedded endpoint, rebuild, remove).
+  SSH, GPG, and git credential tests skipped: no agent, secret keys, or credential helper on the
+  host.
+- Manually: the TUI (`dworm shell` on a PTY) showed `[reconnecting...]` during `docker restart`
+  and started a new working shell afterwards.

@@ -19,9 +19,9 @@ const (
 )
 
 // ProtocolVersion is bumped on incompatible bridge changes. Host and endpoint
-// come from the same build (the endpoint is embedded and injected on every
-// `dworm up`); the check makes any mismatch fail loudly instead of corrupting
-// streams.
+// come from the same build (the endpoint is embedded and injected whenever an
+// instance connects); the check makes any mismatch fail loudly instead of
+// corrupting streams.
 //
 // Version 2: host-opened streams start with a stream type marker.
 // Version 3: endpoint log messages travel over the control channel (TypeLog).
