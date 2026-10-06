@@ -119,9 +119,13 @@ not macOS runtime replacement validation.
 
 ## v0.8.0 validation record
 
-- `go test ./...` (3 repeated runs) and `go vet ./...` passed on Linux amd64 (Go 1.27.1). The race
-  detector was not run: the validation host has no C compiler for cgo. Host cross-builds passed
-  for Linux arm64 and macOS amd64/arm64; macOS was not runtime-tested.
+- `go test ./...` and `go vet ./...` passed on Linux amd64 (Go 1.27.1). `make test-race` passed
+  5 repeated runs (10 for `internal/host`), with `GORACE=log_path=…` also collecting reports from
+  the fake instances the `ensure` tests spawn: none. Host cross-builds passed for Linux arm64 and
+  macOS amd64/arm64; macOS was not runtime-tested.
+- The full Docker suite also passed with a race-enabled `bin/dworm` (`go build -race`, endpoint
+  unchanged) and `GORACE=log_path=…` inherited by every dworm process, including detached
+  instances; no reports. The TUI reconnect scenario below was repeated with that binary.
 - Unit tests run the instance against fake container/endpoint dependencies (socket before ready,
   state sequence, stop, failure, reconnect with exit 255/`bridge lost`, refused tunnels,
   `container_stopped`), concurrent `ensure` calls against the test binary re-executed as a

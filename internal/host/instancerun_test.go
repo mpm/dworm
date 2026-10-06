@@ -122,7 +122,10 @@ func (b *fakeBridge) serve(mux *protocol.Mux) {
 	b.inits = append(b.inits, init)
 	b.mu.Unlock()
 	mux.SendControl(protocol.TypeEnvironmentReady, &protocol.EnvironmentReadyMessage{ProtocolVersion: protocol.ProtocolVersion})
-	mux.SendControl(protocol.TypePortUpdate, &protocol.PortUpdateMessage{Ports: b.ports})
+	b.mu.Lock()
+	ports := b.ports
+	b.mu.Unlock()
+	mux.SendControl(protocol.TypePortUpdate, &protocol.PortUpdateMessage{Ports: ports})
 	mux.SendControl(protocol.TypeLog, &protocol.LogMessage{Level: protocol.LogLevelWarn, Message: "endpoint says hi"})
 	go b.exec.serve(mux)
 	for {
@@ -425,8 +428,10 @@ func TestInstanceReconnectsAfterBridgeLoss(t *testing.T) {
 		d.containerRunning = func(string) bool { return running.Load() }
 		d.retryMin, d.retryMax, d.reconnectWindow = 20*time.Millisecond, 50*time.Millisecond, time.Minute
 	})
+	f.bridge.mu.Lock()
 	f.bridge.ports = []protocol.PortInfo{{Port: port, Address: "127.0.0.1"}}
-	f.bridge.exec.ignoreEOF = true
+	f.bridge.mu.Unlock()
+	f.bridge.exec.setIgnoreEOF(true)
 	// The first bridge came up before the ports were set; reconnecting once
 	// makes the endpoint report them.
 	waitState(t, f.paths.Socket, StateReady)
@@ -501,7 +506,7 @@ func TestInstanceReconnectsAfterBridgeLoss(t *testing.T) {
 	if strings.Join(states, ",") != "reconnecting:bridge_lost,ready:" {
 		t.Fatalf("state events = %v", states)
 	}
-	f.bridge.exec.ignoreEOF = false
+	f.bridge.exec.setIgnoreEOF(false)
 	var stdout strings.Builder
 	ExecViaSocket(f.paths.Socket, protocol.ExecRequest{Argv: []string{"cat"}}, strings.NewReader("again"), &stdout, io.Discard)
 	if stdout.String() != "again" {

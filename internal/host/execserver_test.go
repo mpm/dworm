@@ -75,12 +75,25 @@ func (f *fakeExecEndpoint) handle(stream net.Conn) {
 		case protocol.FrameSignal, protocol.FrameResize:
 			protocol.WriteFrame(stream, protocol.FrameStdout, payload)
 		case protocol.FrameStdinEOF:
-			if !f.ignoreEOF {
+			if !f.ignoresEOF() {
 				protocol.WriteJSONFrame(stream, protocol.FrameExit, protocol.ExecExit{Code: 3})
 				return
 			}
 		}
 	}
+}
+
+func (f *fakeExecEndpoint) ignoresEOF() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ignoreEOF
+}
+
+// setIgnoreEOF changes ignoreEOF while the endpoint serves.
+func (f *fakeExecEndpoint) setIgnoreEOF(ignore bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ignoreEOF = ignore
 }
 
 type syncBuffer struct {
