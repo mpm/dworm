@@ -139,3 +139,17 @@ not macOS runtime replacement validation.
   host.
 - Manually: the TUI (`dworm shell` on a PTY) showed `[reconnecting...]` during `docker restart`
   and started a new working shell afterwards.
+
+## v0.8.1 validation record
+
+- `go test ./...`, `go vet ./...`, and `make test-race` passed on Linux amd64; `make build` passed.
+- Unit tests cover the Compose removal plan and docker calls with a fake `docker` (all services,
+  image order and dedup by tag, networks, volumes kept or removed, failures collected, the
+  single-container path), the published state switching to `reconnecting` as soon as execs are
+  refused, `dworm exec` waiting for a reconnect (one attempt reaches the endpoint), giving up after
+  `--timeout`, never re-sending a started command, and the exit code mapping.
+- Docker: `test-remove.sh`, the new `test-remove-compose.sh` (app with `-uid` image, sidecar
+  service, named volume; pulled image and volume kept, volume removed with `--volumes`),
+  `test-daemon.sh` (now runs `dworm exec` immediately after `docker restart`; it failed with
+  `not ready` on a v0.8.0 build), `test-instance.sh` (`exec --no-start` after `down` exits 125),
+  `test-exec-stdio.sh`, and `test-exec-socket.sh` passed. The full Docker suite was not run.
