@@ -384,9 +384,37 @@ a killed client.
 
 `dworm shell` and `dworm exec` start in the container's workspace folder (the
 in-container path of the project directory), unless `dworm exec --workdir/-w`
-selects another directory. `dworm exec` always forwards stdin, uses a PTY only
-when stdin and stdout are both terminals, writes only the command's output to
-stdout, and exits with the command's exit status.
+selects another directory. `dworm exec` always forwards stdin, automatically uses
+a PTY when stdin and stdout are both terminals, writes only the command's output
+to stdout, and exits with the command's exit status. `-t/--tty` forces a container
+PTY; `-T/--no-tty` forces it off. These flags also apply to `--no-bridge`.
+Without a PTY, stdout and stderr stay separate and unmodified, including for pipes.
+With a PTY they are merged and subject to terminal processing. Explicit `-t` with
+redirected stdio uses an initial size of 80×24 unless a local terminal is available;
+stdin EOF is not a terminal EOF (send Ctrl-D bytes if the program needs them).
+
+For `shell` and TTY `exec`, the host terminal is raw while attached and restored
+when dworm returns. Ctrl-C, Ctrl-Z, and Ctrl-\\ reach the container as input bytes,
+and SIGWINCH updates its PTY size (minus the status bar for `shell`). `$TERM` is
+passed through when the container has its terminfo; otherwise dworm selects
+`xterm-256color`, `xterm`, or `vt100`, preferring available entries. With no
+terminfo installed it defaults to `xterm-256color` for ANSI-aware applications.
+
+Host tmux sessions work with the same paths, including attach/detach and resize:
+
+```bash
+# Run with cwd set to the project directory
+tmux -L massimo new-session -d -s term-project -- dworm shell
+tmux -L massimo new-session -d -s term-codex -- dworm exec -t -- codex
+```
+
+Detaching a tmux client leaves dworm and its container process attached to the
+tmux-owned PTY. Bridge loss ends the original container process/session; host tmux
+does not preserve a process inside a stopped container. `exec` exits 255 immediately
+with a one-line stderr diagnostic and never reruns a started command. The interactive
+`shell` can reconnect to a **new** shell; if the instance stops, its event connection
+breaks, or the bridge does not recover within two minutes, it exits **255** with a
+one-line stderr diagnostic. Normal shell exits retain their exit status.
 
 Exit codes of `dworm exec` that do not come from the command itself (as with
 `docker run`):

@@ -24,6 +24,16 @@ var clearSequences = [][]byte{
 	[]byte("\x1b[H"),  // Cursor home (often used with 2J)
 }
 
+// Keep a lost session distinct from a command that deliberately exits 255.
+var errShellLost = fmt.Errorf("shell lost: %w", &host.ExitError{Code: host.ExitLost})
+
+func shellStopResult(code int) error {
+	if code == host.ExitLost {
+		return errShellLost
+	}
+	return &host.ExitError{Code: code}
+}
+
 const (
 	ctrlG = 0x07 // Ctrl+G key code
 
@@ -40,9 +50,10 @@ const (
 
 // Config describes an interactive shell of a workspace instance.
 type Config struct {
-	SocketPath    string   // the instance socket
-	ContainerName string   // shown in the status bar
-	Argv          []string // shell command
+	SocketPath       string        // the instance socket
+	ContainerName    string        // shown in the status bar
+	Argv             []string      // shell command
+	ReconnectTimeout time.Duration // default: two minutes after a lost shell
 }
 
 // Model manages the TUI session
@@ -52,6 +63,7 @@ type Model struct {
 	statusBar     *StatusBar
 	logBuffer     *LogBuffer
 	outputMu      sync.Mutex
+	uiMu          sync.Mutex // dimensions and status bar shared by input/events/output
 	output        io.Writer
 	origTermState *term.State
 	doneCh        chan struct{}
@@ -65,6 +77,7 @@ type Model struct {
 	readyCh   chan struct{}     // signalled when the instance becomes ready
 	quitCh    chan struct{}     // closed on SIGTERM/SIGHUP or when the instance stops
 	quitOnce  sync.Once
+	quitCode  int // guarded by sessionMu; 255 for instance loss
 }
 
 // Run opens the shell over the instance socket and blocks until it exits.
@@ -84,7 +97,16 @@ func Run(cfg Config) error {
 		quitCh:  make(chan struct{}),
 		state:   host.StateReady,
 	}
-	return m.run()
+	err := m.run()
+	var rejected *host.ExecRejectedError
+	if errors.As(err, &rejected) && rejected.ExitCode != 0 {
+		fmt.Fprintf(os.Stderr, "dworm: %s\n", rejected.Message)
+		return &host.ExitError{Code: rejected.ExitCode}
+	}
+	if errors.Is(err, errShellLost) {
+		fmt.Fprintln(os.Stderr, "dworm: shell lost: container or instance stopped, or bridge did not recover")
+	}
+	return err
 }
 
 func (m *Model) run() error {
@@ -102,6 +124,9 @@ func (m *Model) run() error {
 		return fmt.Errorf("subscribe to instance events: %w", err)
 	}
 	defer events.Close()
+	var doneOnce sync.Once
+	stopReaders := func() { doneOnce.Do(func() { close(m.doneCh) }) }
+	defer stopReaders()
 
 	// Create status bar
 	m.statusBar = NewStatusBar(m.cfg.ContainerName)
@@ -116,6 +141,16 @@ func (m *Model) run() error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if session := m.currentSession(); session != nil {
+			session.Close()
+		}
+	}()
+
+	// Signal handlers must be installed before entering raw mode.
+	sigCh := make(chan os.Signal, 8)
+	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTSTP)
+	defer signal.Stop(sigCh)
 
 	// Put terminal in raw mode
 	m.origTermState, err = term.MakeRaw(int(os.Stdin.Fd()))
@@ -135,21 +170,28 @@ func (m *Model) run() error {
 	m.clearScreen(shellHeight, height)
 	m.renderStatusBar()
 
-	// Handle signals
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigCh)
-
 	go m.handleInput()
-	go m.handleEvents(sigCh, portCh, stateCh, logUpdateCh)
-	defer close(m.doneCh)
+	eventsDone := make(chan struct{})
+	go func() {
+		defer close(eventsDone)
+		m.handleEvents(sigCh, portCh, stateCh, logUpdateCh)
+	}()
+	defer func() {
+		stopReaders()
+		<-eventsDone
+		// Wait for an in-flight input/layout update before terminal restoration.
+		m.uiMu.Lock()
+		m.clearStatusBar()
+		m.uiMu.Unlock()
+	}()
 
 	for {
 		exit := m.copyOutput(session)
 		session.Close()
 		m.setSession(nil)
 		if exit == nil || exit.Error != protocol.ExecErrorBridgeLost {
-			m.clearStatusBar()
+			// An observed exit frame is authoritative even if a concurrent
+			// instance-stop event has arrived too.
 			if exit != nil && exit.Code != 0 {
 				return &host.ExitError{Code: exit.Code}
 			}
@@ -157,7 +199,6 @@ func (m *Model) run() error {
 		}
 		m.writeString("\r\n[dworm] Connection to the container lost, reconnecting...\r\n")
 		if session, err = m.waitAndRestart(); err != nil {
-			m.clearStatusBar()
 			return err
 		}
 	}
@@ -165,18 +206,23 @@ func (m *Model) run() error {
 
 // startSession starts the shell on a PTY sized to the shell area.
 func (m *Model) startSession() (*host.ExecSession, error) {
+	m.uiMu.Lock()
+	rows, cols := calculateShellHeight(m.height, m.statusBar.Height()), m.width
+	m.uiMu.Unlock()
 	termName := os.Getenv("TERM")
 	if termName == "" {
 		termName = "xterm-256color"
 	}
 	session, err := host.StartExec(m.cfg.SocketPath, protocol.ExecRequest{
 		Argv: m.cfg.Argv,
-		TTY:  &protocol.ExecTTY{Rows: calculateShellHeight(m.height, m.statusBar.Height()), Cols: m.width, Term: termName},
+		TTY:  &protocol.ExecTTY{Rows: rows, Cols: cols, Term: termName},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start shell: %w", err)
 	}
 	m.setSession(session)
+	// A device may have resized the host PTY while the start reply was pending.
+	m.resizeSession()
 	return session, nil
 }
 
@@ -184,21 +230,32 @@ func (m *Model) startSession() (*host.ExecSession, error) {
 // instance may still report "ready" for a moment after the exec was lost,
 // so failed starts are retried.
 func (m *Model) waitAndRestart() (*host.ExecSession, error) {
+	timeout := m.cfg.ReconnectTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	for {
+		if code := m.stoppedCode(); code != 0 {
+			return nil, shellStopResult(code)
+		}
 		if m.currentState() == host.StateReady {
 			session, err := m.startSession()
 			if err == nil {
 				m.writeString("[dworm] Reconnected; this is a new shell.\r\n")
 				return session, nil
 			}
-			if errors.Is(err, host.ErrExecSocketUnavailable) {
-				return nil, err
+			if !host.IsNotReady(err) {
+				return nil, errShellLost
 			}
 		}
 		select {
 		case <-m.readyCh:
 		case <-m.quitCh:
-			return nil, errors.New("the dworm instance stopped")
+			return nil, shellStopResult(m.stoppedCode())
+		case <-timer.C:
+			return nil, errShellLost
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
@@ -228,42 +285,51 @@ func (m *Model) currentSession() *host.ExecSession {
 	return m.session
 }
 
-func (m *Model) quit() {
-	m.quitOnce.Do(func() { close(m.quitCh) })
+func (m *Model) quit(code int) {
+	m.quitOnce.Do(func() {
+		m.sessionMu.Lock()
+		m.quitCode = code
+		m.sessionMu.Unlock()
+		close(m.quitCh)
+	})
+}
+
+func (m *Model) stoppedCode() int {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.quitCode
 }
 
 // readEvents feeds instance events to the event handler.
 func (m *Model) readEvents(events *host.EventStream, portCh chan<- []PortMapping, stateCh chan<- string) {
-	send := func(f func()) bool {
-		select {
-		case <-m.doneCh:
-			return false
-		default:
-			f()
-			return true
-		}
-	}
 	for {
 		event, err := events.Next()
 		if err != nil {
-			send(func() { stateCh <- host.StateStopped })
+			select {
+			case stateCh <- host.StateStopped:
+			case <-m.doneCh:
+			}
 			return
 		}
-		ok := true
 		switch event.Type {
 		case host.EventPorts:
 			ports := make([]PortMapping, len(event.Ports))
 			for i, p := range event.Ports {
 				ports[i] = PortMapping{ContainerPort: p.Port, LocalPort: p.LocalPort}
 			}
-			ok = send(func() { portCh <- ports })
+			select {
+			case portCh <- ports:
+			case <-m.doneCh:
+				return
+			}
 		case host.EventLog:
 			fmt.Fprintf(m.logBuffer, "[%s] %s\n", event.Source, event.Message)
 		case host.EventState:
-			ok = send(func() { stateCh <- event.State })
-		}
-		if !ok {
-			return
+			select {
+			case stateCh <- event.State:
+			case <-m.doneCh:
+				return
+			}
 		}
 	}
 }
@@ -274,18 +340,15 @@ func (m *Model) copyOutput(session *host.ExecSession) *protocol.ExecExit {
 	for {
 		frameType, payload, err := session.ReadFrame()
 		if err != nil {
-			select {
-			case <-m.quitCh:
-				return nil
-			default:
-				return &protocol.ExecExit{Code: 255, Error: protocol.ExecErrorBridgeLost}
-			}
+			return &protocol.ExecExit{Code: host.ExitLost, Error: protocol.ExecErrorBridgeLost}
 		}
 		switch frameType {
 		case protocol.FrameStdout, protocol.FrameStderr:
+			m.uiMu.Lock()
 			if m.writePTYOutput(payload) {
 				m.renderStatusBar()
 			}
+			m.uiMu.Unlock()
 		case protocol.FrameExit:
 			return host.ParseExit(payload)
 		}
@@ -296,12 +359,15 @@ func (m *Model) handleInput() {
 	buf := make([]byte, 4096)
 	for {
 		n, err := os.Stdin.Read(buf)
+		m.uiMu.Lock()
 		select {
 		case <-m.doneCh:
+			m.uiMu.Unlock()
 			return
 		default:
 		}
 		if err != nil {
+			m.uiMu.Unlock()
 			return
 		}
 		input := buf[:n]
@@ -311,6 +377,8 @@ func (m *Model) handleInput() {
 			m.clearMaxStatusArea()
 			m.statusBar.SetExpanded(false)
 			m.resizeAndRender()
+			m.uiMu.Unlock()
+			m.resizeSession()
 			continue
 		}
 
@@ -319,13 +387,19 @@ func (m *Model) handleInput() {
 		if toggle >= 0 {
 			input = input[:toggle]
 		}
-		if session := m.currentSession(); session != nil && len(input) > 0 {
-			session.Write(input)
-		}
 		if toggle >= 0 {
 			m.clearMaxStatusArea()
 			m.statusBar.ToggleExpanded()
 			m.resizeAndRender()
+		}
+		m.uiMu.Unlock()
+		// Never hold the layout lock across socket writes: a large paste can
+		// backpressure stdin while stdout still needs to be drained/rendered.
+		if session := m.currentSession(); session != nil && len(input) > 0 {
+			session.Write(input)
+		}
+		if toggle >= 0 {
+			m.resizeSession()
 		}
 	}
 }
@@ -339,24 +413,31 @@ func (m *Model) handleEvents(sigCh chan os.Signal, portCh <-chan []PortMapping, 
 		case sig := <-sigCh:
 			switch sig {
 			case syscall.SIGWINCH:
+				m.uiMu.Lock()
 				m.handleResize()
-			case syscall.SIGINT:
+				m.uiMu.Unlock()
+				m.resizeSession()
+			case syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTSTP:
 				if session := m.currentSession(); session != nil {
-					session.Write([]byte{0x03}) // Ctrl+C
+					key := map[os.Signal]byte{syscall.SIGINT: 0x03, syscall.SIGQUIT: 0x1c, syscall.SIGTSTP: 0x1a}[sig]
+					session.Write([]byte{key})
 				}
 			case syscall.SIGTERM, syscall.SIGHUP:
 				// Leave: closing the session hangs up the shell.
-				m.quit()
+				m.quit(128 + int(sig.(syscall.Signal)))
 				if session := m.currentSession(); session != nil {
 					session.Close()
 				}
 			}
 
 		case ports := <-portCh:
+			m.uiMu.Lock()
 			m.statusBar.SetPorts(ports)
 			m.renderStatusBar()
+			m.uiMu.Unlock()
 
 		case state := <-stateCh:
+			m.uiMu.Lock()
 			m.setState(state)
 			m.statusBar.SetState(state)
 			m.renderStatusBar()
@@ -367,14 +448,20 @@ func (m *Model) handleEvents(sigCh chan os.Signal, portCh <-chan []PortMapping, 
 				default:
 				}
 			case host.StateStopping, host.StateStopped, host.StateFailed:
-				m.quit()
+				m.quit(host.ExitLost)
+				if session := m.currentSession(); session != nil {
+					session.Close()
+				}
 			}
+			m.uiMu.Unlock()
 
 		case <-logUpdateCh:
+			m.uiMu.Lock()
 			m.statusBar.SetLogs(m.logBuffer.Lines())
 			if m.statusBar.IsExpanded() {
 				m.renderStatusBar()
 			}
+			m.uiMu.Unlock()
 		}
 	}
 }
@@ -396,8 +483,6 @@ func (m *Model) handleResize() {
 	shellHeight := calculateShellHeight(height, m.statusBar.Height())
 	m.updateTerminalLayout(shellHeight, height)
 
-	m.resizeSession(shellHeight)
-
 	// Render status bar
 	m.renderStatusBar()
 }
@@ -414,15 +499,16 @@ func (m *Model) resizeAndRender() {
 	shellHeight := calculateShellHeight(height, m.statusBar.Height())
 	m.updateTerminalLayout(shellHeight, height)
 
-	m.resizeSession(shellHeight)
-
 	m.renderStatusBar()
 }
 
 // resizeSession resizes the shell's PTY in the container.
-func (m *Model) resizeSession(shellHeight int) {
+func (m *Model) resizeSession() {
+	m.uiMu.Lock()
+	shellHeight, width := calculateShellHeight(m.height, m.statusBar.Height()), m.width
+	m.uiMu.Unlock()
 	if session := m.currentSession(); session != nil {
-		session.Resize(shellHeight, m.width)
+		session.Resize(shellHeight, width)
 	}
 }
 

@@ -28,11 +28,17 @@ func (e *ExitError) Error() string {
 // Stdin is always attached; a TTY is allocated only when stdin and stdout are
 // both terminals, so piped use gets a clean byte stream.
 func ExecCommand(containerID string, workDir string, envVars map[string]string, command []string) error {
+	return ExecCommandTTY(containerID, workDir, envVars, command, StdioIsTerminal())
+}
+
+// ExecCommandTTY runs plain docker exec with an explicit PTY choice. Docker
+// owns local raw mode and resizing in this path.
+func ExecCommandTTY(containerID string, workDir string, envVars map[string]string, command []string, tty bool) error {
 	if len(command) == 0 {
 		return fmt.Errorf("no command specified")
 	}
 
-	args := buildDockerExecArgs(containerID, workDir, envVars, StdioIsTerminal(), false, command)
+	args := buildDockerExecArgs(containerID, workDir, envVars, tty, false, command)
 	return runDocker(args, os.Stdin, os.Stdout, os.Stderr)
 }
 

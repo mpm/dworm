@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/mpm/dworm/internal/protocol"
 	"golang.org/x/term"
@@ -45,6 +46,7 @@ func StartExec(socketPath string, req protocol.ExecRequest) (*ExecSession, error
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrExecSocketUnavailable, err)
 	}
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	req.Version = protocol.ExecRequestVersion
 	req.Mode = protocol.ExecModeFramed
 	header, err := json.Marshal(req)
@@ -71,6 +73,7 @@ func StartExec(socketPath string, req protocol.ExecRequest) (*ExecSession, error
 		conn.Close()
 		return nil, &ExecRejectedError{Message: reply.Error, Code: reply.Code, ExitCode: reply.ExitCode}
 	}
+	conn.SetDeadline(time.Time{})
 	return &ExecSession{ID: reply.ID, conn: conn, reader: reader}, nil
 }
 
@@ -206,29 +209,50 @@ func ExecViaSocket(socketPath string, req protocol.ExecRequest, stdin io.Reader,
 }
 
 // ExecTTY runs a command on a PTY in the container, attached to this
-// process's terminal (stdin and stdout must be terminals). The terminal is
+// process's stdio. If stdin is a terminal, the terminal is
 // in raw mode meanwhile, so keys like Ctrl-C reach the command; window size
 // changes are forwarded. SIGTERM and SIGINT are forwarded as signals, SIGHUP
 // hangs up the session.
 func ExecTTY(socketPath string, req protocol.ExecRequest) error {
-	cols, rows, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return fmt.Errorf("get terminal size: %w", err)
+	// Explicit -t also works with redirected stdio. Only a real local terminal
+	// gets raw mode or resize handling; otherwise use a conventional initial size.
+	fd := -1
+	for _, file := range []*os.File{os.Stdout, os.Stdin} {
+		if term.IsTerminal(int(file.Fd())) {
+			fd = int(file.Fd())
+			break
+		}
+	}
+	cols, rows := 80, 24
+	if fd >= 0 {
+		var err error
+		cols, rows, err = term.GetSize(fd)
+		if err != nil {
+			return fmt.Errorf("get terminal size: %w", err)
+		}
 	}
 	termName := os.Getenv("TERM")
 	if termName == "" {
 		termName = "xterm-256color"
 	}
 	req.TTY = &protocol.ExecTTY{Rows: rows, Cols: cols, Term: termName}
+	// Install handlers before raw mode, including while starting the command.
+	sigCh := make(chan os.Signal, 8)
+	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTSTP)
+	defer signal.Stop(sigCh)
 	// Raw mode before the start: a failure here must not leave a started
 	// command behind.
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return fmt.Errorf("set raw mode: %w", err)
+	var oldState *term.State
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		var err error
+		oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
+		if err != nil {
+			return fmt.Errorf("set raw mode: %w", err)
+		}
 	}
 	restored := false
 	restore := func() {
-		if !restored {
+		if !restored && oldState != nil {
 			term.Restore(int(os.Stdin.Fd()), oldState)
 			restored = true
 		}
@@ -254,9 +278,6 @@ func ExecTTY(socketPath string, req protocol.ExecRequest) error {
 		}
 	}()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigCh)
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -265,7 +286,7 @@ func ExecTTY(socketPath string, req protocol.ExecRequest) error {
 			case sig := <-sigCh:
 				switch sig {
 				case syscall.SIGWINCH:
-					if cols, rows, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+					if cols, rows, err := term.GetSize(fd); fd >= 0 && err == nil {
 						session.Resize(rows, cols)
 					}
 				case syscall.SIGHUP:
@@ -303,6 +324,10 @@ func unixSignalName(sig os.Signal) string {
 		return "TERM"
 	case syscall.SIGHUP:
 		return "HUP"
+	case syscall.SIGQUIT:
+		return "QUIT"
+	case syscall.SIGTSTP:
+		return "TSTP"
 	default:
 		return sig.String()
 	}

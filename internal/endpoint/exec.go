@@ -383,9 +383,7 @@ func startTTYProcess(argv []string, dir string, env map[string]string, tty *prot
 	if err != nil {
 		return nil, nil, err
 	}
-	if tty.Term != "" {
-		env = config.Merge(env, map[string]string{"TERM": tty.Term})
-	}
+	env = config.Merge(env, map[string]string{"TERM": terminalName(tty.Term, env, dir)})
 	environ := make([]string, 0, len(env))
 	for k, v := range env {
 		environ = append(environ, k+"="+v)

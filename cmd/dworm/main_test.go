@@ -103,3 +103,36 @@ func TestExitCodeFor(t *testing.T) {
 		t.Fatalf("exitExecFailed = %d; it is documented as 125", exitExecFailed)
 	}
 }
+
+func TestExecTTYFlags(t *testing.T) {
+	for _, tt := range []struct {
+		args                     []string
+		terminals, want, invalid bool
+	}{
+		{nil, true, true, false},
+		{nil, false, false, false},
+		{[]string{"-t"}, false, true, false},
+		{[]string{"--tty"}, true, true, false},
+		{[]string{"-T"}, true, false, false},
+		{[]string{"--no-tty"}, false, false, false},
+		{[]string{"--tty=false"}, true, false, false},
+		{[]string{"-t", "-T"}, true, false, true},
+	} {
+		t.Run(fmt.Sprint(tt.args, tt.terminals), func(t *testing.T) {
+			cmd := &cobra.Command{Use: "exec", RunE: func(cmd *cobra.Command, _ []string) error {
+				if got := execWantsTTY(cmd, tt.terminals); got != tt.want {
+					t.Fatalf("TTY = %v, want %v", got, tt.want)
+				}
+				return nil
+			}}
+			addExecTTYFlags(cmd)
+			cmd.SetArgs(tt.args)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			err := cmd.Execute()
+			if (err != nil) != tt.invalid {
+				t.Fatalf("Execute() = %v, invalid = %v", err, tt.invalid)
+			}
+		})
+	}
+}

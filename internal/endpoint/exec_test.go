@@ -279,7 +279,7 @@ func (f *execFixture) startTTY(script string) net.Conn {
 	f.t.Helper()
 	stream, reply := f.start(protocol.ExecRequest{
 		Version: 1, Argv: []string{"sh", "-c", script}, ID: "tty",
-		TTY: &protocol.ExecTTY{Rows: 24, Cols: 80, Term: "xterm-test"},
+		TTY: &protocol.ExecTTY{Rows: 24, Cols: 80, Term: "xterm-256color"},
 	})
 	if !reply.OK {
 		f.t.Fatalf("tty exec rejected: %s", reply.Error)
@@ -323,7 +323,7 @@ func TestExecTTYResizeAndTerm(t *testing.T) {
 	protocol.WriteJSONFrame(stream, protocol.FrameResize, protocol.ExecResize{Rows: 40, Cols: 100})
 	protocol.WriteFrame(stream, protocol.FrameStdin, []byte("\r"))
 	result := collect(t, stream)
-	for _, want := range []string{"40 100", "term=xterm-test", "tty-ok"} {
+	for _, want := range []string{"40 100", "term=xterm-256color", "tty-ok"} {
 		if !strings.Contains(result.stdout, want) {
 			t.Fatalf("output %q lacks %q", result.stdout, want)
 		}

@@ -153,12 +153,19 @@ without a terminal, it waits until the instance is ready and exits.`,
 	execCmd := &cobra.Command{
 		Use:   "exec -- COMMAND [ARG...]",
 		Short: "Run a command in the container and exit",
-		Args:  cobra.MinimumNArgs(1),
-		RunE:  runOperationalCommand(runExec),
+		Long: `Run a command through the workspace instance and return its exit status.
+A container PTY is allocated automatically when stdin and stdout are terminals.
+Use -t/--tty to force a PTY, or -T/--no-tty for separate, unmodified stdout/stderr.
+With a PTY, terminal keys and window resizes reach the container process.
+A started command lost with the bridge or instance exits 255 with a stderr message;
+it is never restarted. Failures before execution exit 125 (126/127 for start errors).`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: runOperationalCommand(runExec),
 	}
 	execCmd.Flags().StringVarP(&execDir, "workdir", "w", "", "Working directory inside the container (default: the workspace folder)")
 	execCmd.Flags().BoolVar(&noStart, "no-start", false, "Fail instead of starting a stopped container")
 	execCmd.Flags().BoolVar(&noBridge, "no-bridge", false, "Run through plain `docker exec` instead of the instance (no forwarding, no process cleanup)")
+	addExecTTYFlags(execCmd)
 	addEnsureFlags(execCmd)
 	rootCmd.AddCommand(execCmd)
 
@@ -526,8 +533,9 @@ func runShell(cmd *cobra.Command, args []string) error {
 }
 
 func runExec(cmd *cobra.Command, args []string) error {
+	tty := execWantsTTY(cmd, host.StdioIsTerminal())
 	if noBridge {
-		return runExecNoBridge(args)
+		return runExecNoBridge(args, tty)
 	}
 	opts, err := ensureOptions(cmd, false)
 	if err != nil {
@@ -541,15 +549,30 @@ func runExec(cmd *cobra.Command, args []string) error {
 	// command; EnsureAndRun waits for the instance and sends it again.
 	req := protocol.ExecRequest{Argv: args, Cwd: execDir, Env: parseEnvVars()}
 	return host.EnsureAndRun(ctx, opts, func(state *host.InstanceState) error {
-		if host.StdioIsTerminal() {
+		if tty {
 			return host.ExecTTY(state.ExecSocket, req)
 		}
 		return host.ExecViaSocket(state.ExecSocket, req, os.Stdin, os.Stdout, os.Stderr)
 	})
 }
 
+func addExecTTYFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolP("tty", "t", false, "Allocate a container PTY (default: auto-detect stdin/stdout terminals)")
+	cmd.Flags().BoolP("no-tty", "T", false, "Disable the container PTY, even on a terminal")
+	cmd.MarkFlagsMutuallyExclusive("tty", "no-tty")
+}
+
+func execWantsTTY(cmd *cobra.Command, terminals bool) bool {
+	if cmd.Flags().Changed("tty") {
+		tty, _ := cmd.Flags().GetBool("tty")
+		return tty
+	}
+	noTTY, _ := cmd.Flags().GetBool("no-tty")
+	return terminals && !noTTY
+}
+
 // runExecNoBridge runs the command through plain `docker exec`.
-func runExecNoBridge(args []string) error {
+func runExecNoBridge(args []string, tty bool) error {
 	workspacePath, err := getWorkspacePath()
 	if err != nil {
 		return err
@@ -563,7 +586,7 @@ func runExecNoBridge(args []string) error {
 	if workDir == "" {
 		workDir = host.WorkspaceFolder(containerID, workspacePath)
 	}
-	return host.ExecCommand(containerID, workDir, parseEnvVars(), args)
+	return host.ExecCommandTTY(containerID, workDir, parseEnvVars(), args, tty)
 }
 
 func runRemove(cmd *cobra.Command, args []string, force, volumes bool) error {
