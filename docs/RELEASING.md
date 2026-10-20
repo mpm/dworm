@@ -19,6 +19,7 @@ GitHub Actions release workflow injects the pushed tag into the host binary.
    make build
    ./test/e2e/test-env-vars.sh
    ./test/e2e/test-project-env.sh
+   ./test/e2e/test-devcontainer-env.sh
    ./test/e2e/test-instance.sh
    git diff --check
    ```
@@ -153,3 +154,19 @@ not macOS runtime replacement validation.
   `test-daemon.sh` (now runs `dworm exec` immediately after `docker restart`; it failed with
   `not ready` on a v0.8.0 build), `test-instance.sh` (`exec --no-start` after `down` exits 125),
   `test-exec-stdio.sh`, and `test-exec-socket.sh` passed. The full Docker suite was not run.
+
+## v0.9.0 validation record
+
+- `make test-race`, `go vet ./...`, `make build`, and `git diff --check` passed on
+  Linux amd64 (Go 1.27.2).
+- Config and fake-CLI tests cover validation, inherited/configured precedence,
+  literal and empty values, custom config paths, startup and rebuild, and
+  isolation from the parent process, other Docker commands and `.dworm.env`.
+- The new isolated `test-devcontainer-env.sh` passed with Docker Compose v5.6.0,
+  Buildx v0.38.0 and Dev Container CLI 0.89.0: fresh Compose build and rebuild
+  work without a command prefix, the configured variables reach the host CLI
+  and Compose, and they do not appear in container sessions.
+- `test-env-vars.sh`, `test-project-env.sh`, and `test-rebuild.sh` passed.
+  `test-instance.sh` initially failed its SIGKILLed TTY client cleanup assertion;
+  after recreating the test container via `test-rebuild.sh`, it passed in full.
+  The full Docker suite was not run.

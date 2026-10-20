@@ -25,7 +25,7 @@ func TestLoadAndPrecedence(t *testing.T) {
 	if _, _, err := Load(root); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".dworm.config"), []byte("bind = '0.0.0.0'\n[host_env]\ncommand = ['bash', './token.sh']\nrefresh_interval = '1h'\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".dworm.config"), []byte("bind = '0.0.0.0'\n[host_env]\ncommand = ['bash', './token.sh']\nrefresh_interval = '1h'\n[devcontainer_env]\nBUILDX_BAKE_ENTITLEMENTS_FS = '0'\nEMPTY = ''\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, ".dworm.env"), []byte("TOKEN=static\nKEEP=yes\n"), 0600); err != nil {
@@ -35,10 +35,16 @@ func TestLoadAndPrecedence(t *testing.T) {
 	if err != nil || cfg.Bind != "0.0.0.0" || len(cfg.HostEnv.Command) != 2 {
 		t.Fatalf("%+v %v", cfg, err)
 	}
+	if !reflect.DeepEqual(cfg.DevcontainerEnv, map[string]string{"BUILDX_BAKE_ENTITLEMENTS_FS": "0", "EMPTY": ""}) {
+		t.Fatalf("devcontainer_env = %#v", cfg.DevcontainerEnv)
+	}
+	if _, ok := static["BUILDX_BAKE_ENTITLEMENTS_FS"]; ok {
+		t.Fatal("devcontainer_env leaked into container environment")
+	}
 	if got := Merge(static, map[string]string{"TOKEN": "generated"}, map[string]string{"TOKEN": "cli"}); got["TOKEN"] != "cli" || got["KEEP"] != "yes" {
 		t.Fatal(got)
 	}
-	for _, invalid := range []string{"unknown = true", "[host_env]\nurl = 'https://example.com'", "[host_env]\nrefresh_interval = '1h'", "[host_env]\ncommand=['true']\ntimeout='0s'"} {
+	for _, invalid := range []string{"unknown = true", "[host_env]\nurl = 'https://example.com'", "[host_env]\nrefresh_interval = '1h'", "[host_env]\ncommand=['true']\ntimeout='0s'", "[devcontainer_env]\nBAD-NAME = 'value'", "[devcontainer_env]\n_DWORM_BASE = 'value'", "[devcontainer_env]\nVALUE = \"\\u0000\"", "[devcontainer_env]\nVALUE = 0"} {
 		os.WriteFile(filepath.Join(root, ".dworm.config"), []byte(invalid), 0600)
 		if _, _, err := Load(root); err == nil {
 			t.Errorf("accepted %s", invalid)

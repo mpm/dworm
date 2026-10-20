@@ -178,6 +178,11 @@ Key flows (see "Instance lifecycle" below):
   `rm -v` for anonymous ones). Each failure is collected and the rest still runs; it logs
   `Removed containers/images/networks/volumes: …` and `Kept volumes …`
 - `rebuild`: DevcontainerRebuild (calls `devcontainer up --remove-existing-container`; rebuilds and exits, user runs `up` separately)
+- `.dworm.config` supports `[devcontainer_env]` (string map) for the host-side
+  Dev Container CLI only. `devcontainerCommand` in `container.go` applies it to
+  startup and rebuild, overriding inherited values without mutating the parent
+  environment or forwarding it into the container snapshot. Validate using
+  `config.Validate`; keep it separate from `.dworm.env` and `[host_env]` output.
 
 ### Exec over the bridge (`internal/host/execserver.go`, `internal/endpoint/exec.go`)
 

@@ -15,8 +15,9 @@ import (
 )
 
 type Config struct {
-	Bind    string  `toml:"bind"`
-	HostEnv HostEnv `toml:"host_env"`
+	Bind            string            `toml:"bind"`
+	HostEnv         HostEnv           `toml:"host_env"`
+	DevcontainerEnv map[string]string `toml:"devcontainer_env"`
 }
 
 type HostEnv struct {
@@ -62,6 +63,9 @@ func Load(root string) (Config, map[string]string, error) {
 	}
 	if len(cfg.HostEnv.Command) > 0 && cfg.HostEnv.Command[0] == "" {
 		return cfg, nil, fmt.Errorf("host_env.command cannot be empty")
+	}
+	if err := Validate(cfg.DevcontainerEnv); err != nil {
+		return cfg, nil, fmt.Errorf("devcontainer_env: %w", err)
 	}
 	data, err = os.ReadFile(filepath.Join(root, ".dworm.env"))
 	if os.IsNotExist(err) {

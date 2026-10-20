@@ -10,6 +10,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/mpm/dworm/internal/config"
 )
 
 // ContainerInfo holds information about a running devcontainer
@@ -28,7 +30,10 @@ func DevcontainerUp(ctx context.Context, workspacePath, configPath string, progr
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
-	cmd := exec.CommandContext(ctx, "devcontainer", args...)
+	cmd, err := devcontainerCommand(ctx, workspacePath, args...)
+	if err != nil {
+		return nil, err
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -143,7 +148,10 @@ func DevcontainerRebuild(workspacePath, configPath string) (*ContainerInfo, erro
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
-	cmd := exec.Command("devcontainer", args...)
+	cmd, err := devcontainerCommand(context.Background(), workspacePath, args...)
+	if err != nil {
+		return nil, err
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -179,6 +187,21 @@ func DevcontainerRebuild(workspacePath, configPath string) (*ContainerInfo, erro
 		WorkspaceDir:  result.RemoteWorkspaceDir,
 		RemoteUser:    result.RemoteUser,
 	}, nil
+}
+
+// devcontainerCommand applies project build settings only to the host-side CLI
+// and its children, without changing dworm's environment or container snapshot.
+func devcontainerCommand(ctx context.Context, workspacePath string, args ...string) (*exec.Cmd, error) {
+	cfg, _, err := config.Load(workspacePath)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "devcontainer", args...)
+	cmd.Env = cmd.Environ()
+	for key, value := range cfg.DevcontainerEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	return cmd, nil
 }
 
 // IsContainerRunning checks if a container is running

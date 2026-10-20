@@ -11,6 +11,7 @@ A CLI tool that bridges your host machine and devcontainer environments, providi
 - **Git Credential Forwarding**: Push/pull to private repos using host's credential helpers
 - **Environment Variable Injection**: Pass environment variables from host to container
 - **Project Environment Configuration**: Load `.dworm.env` and run host commands to generate and periodically refresh variables across dworm shells
+- **Host Build Environment**: Persist project-specific Dev Container CLI variables in `.dworm.config` for startup and rebuild
 - **Shell Access**: Interactive shell with all forwarding active, on a PTY in the container
 - **One-shot Command Execution**: Run a command in the container and exit
 - **One Background Instance per Workspace**: Shared by all commands; it reconnects by itself when
@@ -333,6 +334,36 @@ When upgrading, install `dworm`, which includes its matching endpoints, and run
 `dworm stop` so the next command starts an instance that injects the new
 endpoint. Reopen existing shells to activate the environment reload hook.
 
+### Host-side Dev Container environment
+
+Starting with v0.9.0, `.dworm.config` can also supply static environment variables
+to the **host-side Dev Container CLI** and its child processes, including Docker
+Compose and Buildx:
+
+```toml
+[devcontainer_env]
+BUILDX_BAKE_ENTITLEMENTS_FS = "0"
+```
+
+This example works around Compose/Buildx filesystem entitlement errors when the
+Dev Container CLI creates a temporary `Dockerfile-with-features` outside the build
+context. It disables Bake's filesystem entitlement checks for this project's CLI
+invocation; it does not change the host's global configuration.
+
+The section applies to `dworm rebuild` and any command that starts the workspace
+instance (`up`, `shell`, or `exec`). Values must be TOML strings; empty strings are
+allowed. Names follow the same validation as `.dworm.env`. Values are literal:
+there is no shell expansion, variable interpolation, or command substitution.
+Configured values override inherited host variables with the same name; other
+host variables are preserved. Omit a key to use its inherited host value.
+
+These settings are separate from `.dworm.env`, `[host_env]` command output, and
+`--env`: they are not added to the container's shared environment snapshot or to
+the host environment command. The Dev Container CLI can still use them through
+explicit `${localEnv:NAME}` references in `devcontainer.json`. Settings are read
+when launching the CLI; run `dworm stop` first if a workspace instance is already
+running and you want to exercise a new startup configuration.
+
 ### Other commands
 
 ```bash
@@ -542,7 +573,9 @@ dworm uses standard devcontainer configuration. Create a `.devcontainer/devconta
 ```
 
 Optional [`.dworm.config` and `.dworm.env`](#project-environment-and-host-startup-commands)
-configure host commands, environment variables, and port binding. They complement
+configure host commands, environment variables, and port binding. The
+[`devcontainer_env` section](#host-side-dev-container-environment) supplies
+host-side build settings. They complement
 `devcontainer.json`; the CLI `--config` flag still selects a devcontainer configuration.
 
 ## Testing
