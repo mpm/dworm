@@ -68,6 +68,8 @@ func NewClientMux(rwc io.ReadWriteCloser, logger *log.Logger) (*Mux, error) {
 
 func newYamuxConfig(logger *log.Logger) *yamux.Config {
 	config := yamux.DefaultConfig()
+	config.ConnectionWriteTimeout = BridgeStallTimeout
+	config.StreamOpenTimeout = BridgeStallTimeout
 	config.LogOutput = nil
 	config.Logger = logger
 	return config

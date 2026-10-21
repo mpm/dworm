@@ -73,6 +73,9 @@ internal/
 ### Protocol (`internal/protocol/`)
 
 - **Multiplexing**: Uses `github.com/hashicorp/yamux` over stdin/stdout
+  (`newYamuxConfig`). Keepalive stays on (30s), but ping replies, blocked writes and stream opens get
+  `protocol.BridgeStallTimeout` (5 min) instead of yamux's 10s/75s, so a host frozen by memory
+  pressure does not tear down the bridge (and every exec on it); a dead pipe still shows up as EOF.
 - **Control channel**: Stream 0, length-prefixed JSON messages (max 1MB via `MaxControlMessageSize`)
 - **Other streams**: Stream 1+. Every stream starts with a 1-byte type marker. Host-opened:
   `StreamTypeTunnel` (0x10, TCP tunnel), `StreamTypeExec` (0x11, process execution).

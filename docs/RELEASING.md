@@ -170,3 +170,14 @@ not macOS runtime replacement validation.
   `test-instance.sh` initially failed its SIGKILLed TTY client cleanup assertion;
   after recreating the test container via `test-rebuild.sh`, it passed in full.
   The full Docker suite was not run.
+
+## v0.9.1 validation record
+
+- `make test-race`, `make build`, and `git diff --check` passed on Linux amd64.
+- A unit test checks the yamux configuration: keepalive enabled, ping/write and
+  stream-open timeouts set to `BridgeStallTimeout` (5 min), and the config accepted
+  by `yamux.VerifyConfig`. The host stalls themselves (about three minutes, under
+  memory pressure) were diagnosed from instance logs and were not reproduced.
+- `TestTTYClientsOverInstanceSocket` (`internal/endpoint`) fails intermittently
+  (about 1 in 5 runs) with and without this change: a status bar redraw lands
+  inside the expected output. It is not related to the release.

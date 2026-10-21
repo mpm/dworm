@@ -137,6 +137,8 @@ prints `dworm: bridge lost`); the shell's status bar shows `reconnecting...` and
 a new shell starts once the instance is ready again. A `dworm exec` started
 during a reconnect waits for it (within `--timeout`) and then runs the command;
 `dworm status` reports `reconnecting` from the moment the bridge is lost.
+A host that freezes for a while (e.g. under memory pressure) does not break the
+bridge: it tolerates an unresponsive endpoint for up to five minutes.
 
 The instance's files live in `$XDG_RUNTIME_DIR/dworm/` (or `/tmp/dworm-$UID/`,
 mode `0700`), named after a hash of the workspace path: an `flock` lock, a state
