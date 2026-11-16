@@ -171,7 +171,8 @@ func TestTTYClientsOverInstanceSocket(t *testing.T) {
 				script := `stty -echo; echo READY; while :; do sleep 0.05; done`
 				switch scenario {
 				case "resize and exit":
-					script = `stty -echo; trap 'printf "RESIZED="; stty size' WINCH; printf "INITIAL="; stty size; while :; do read x; [ "$x" = exit ] && exit 37; done`
+					// One write per line: a status bar redraw may come between writes.
+					script = `stty -echo; trap 'echo "RESIZED=$(stty size)"' WINCH; echo "INITIAL=$(stty size)"; while :; do read x; [ "$x" = exit ] && exit 37; done`
 				case "control bytes":
 					script = `stty raw -echo; echo READY; dd bs=1 count=3 2>/dev/null | od -An -tx1; exit 19`
 				case "start rejected":
@@ -181,7 +182,7 @@ func TestTTYClientsOverInstanceSocket(t *testing.T) {
 				case "command exits 255":
 					script = `stty -echo; echo READY; read x; exit 255`
 				case "reconnect new shell":
-					script = `stty -echo; printf "INITIAL="; stty size; echo READY; read x; exit 42`
+					script = `stty -echo; echo "INITIAL=$(stty size)"; echo READY; read x; exit 42`
 				}
 				c := startTTYClient(t, mode, socket.Path(), script)
 				if scenario == "start rejected" {

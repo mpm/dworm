@@ -2,6 +2,7 @@ package host
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,7 +59,9 @@ func StartExec(socketPath string, req protocol.ExecRequest) (*ExecSession, error
 		conn.Close()
 		return nil, fmt.Errorf("%w: %v", ErrExecSocketUnavailable, err)
 	}
-	reader := bufio.NewReader(conn)
+	// Large enough to hold the many small frames of an output flood, so that
+	// a client can take them together (FrameReady).
+	reader := bufio.NewReaderSize(conn, 64<<10)
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
 		conn.Close()
@@ -112,6 +115,19 @@ func (s *ExecSession) Resize(rows, cols int) error {
 
 // ReadFrame returns the next output frame (stdout, stderr, or exit).
 func (s *ExecSession) ReadFrame() (byte, []byte, error) { return protocol.ReadFrame(s.reader) }
+
+// FrameReady reports whether a complete frame has already arrived, so that
+// ReadFrame returns it without waiting.
+func (s *ExecSession) FrameReady() bool {
+	if s.reader.Buffered() < 5 {
+		return false
+	}
+	header, err := s.reader.Peek(5)
+	if err != nil {
+		return false
+	}
+	return s.reader.Buffered() >= 5+int(binary.BigEndian.Uint32(header[1:5]))
+}
 
 // Close disconnects; a process that has not exited yet is terminated.
 func (s *ExecSession) Close() error { return s.conn.Close() }

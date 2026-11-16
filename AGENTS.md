@@ -384,7 +384,32 @@ For each detected port:
 - When the exec ends with `bridge lost`, it prints a notice, waits until the instance is `ready`
   again, and starts a new shell; it exits when the instance stops
 - Scroll region restricts shell output to above status bar; Ctrl+G toggles the expanded view
-- Clear screen detection re-renders status bar after vim/htop/etc
+- Clear screen detection re-renders status bar after vim/htop/etc (`CSI J` except "erase above", `CSI H`)
+- Child output is translated, not forwarded verbatim (`translateChildSequence`), because the TUI
+  itself runs on the host terminal's alternate screen and shares it with the status bar:
+  alternate-screen switches (modes 47/1047/1049, also inside a parameter list) are emulated in the
+  shell area (enter = erase; leave = repaint the shell screen from the shadow screen, cursor and
+  attributes included), `ESC c` (RIS) becomes a soft reset + erase, scroll regions (`CSI t;b r`) and
+  absolute rows (`CSI r;c H`/`f`, `CSI r d`) are clamped to the shell area, and `CSI !p` (DECSTR) gets
+  the scroll region set again. Never forward a sequence that leaves the alternate screen.
+- **Shadow screen** (`shadow.go`): a `charmbracelet/x/vt` emulator of the shell area's size is fed the
+  same child output (and dworm's own notices). It provides the repaint, the cursor, the pen and what
+  the child saved with ESC 7/CSI s/`?1048h` (pen and saved cursor are not exported by the emulator:
+  tracked by handlers that run before its own and return `false`). Status bar drawing uses the host's
+  `CSI s`/`CSI u` unless the child has a saved cursor; then it puts the child's saved state back into
+  the host's one slot (ESC 7) and returns via CUP + SGR (`drawOutsideShell`, `restoreSequence`).
+  `emulatorInput` covers emulator gaps: `CSI u` → ESC 8, mode 47 → 1047, DECSTR resets margins/pen,
+  scroll regions clamped (an out-of-range one makes the emulator panic; `protect` resets the shadow
+  on any panic). After a cursor restore a CUP clears its stale pending wrap. Replies to queries go
+  through a synchronous pipe that a goroutine drains; close it with `closeEmulator` (not
+  `Emulator.Close`, which races with that goroutine).
+- Throughput: the emulator moves the whole screen per scrolled line and costs ~200 ns per printed
+  character. Runs of text/SGR/OSC (`isLinearPart`) go through `writeRun`: `skipScrolledOff` drops what
+  scrolls off anyway (cut after a CR LF with ≥ a screen of line feeds before and after; only OSC, the
+  pen and the cursor are kept) and `prescroll` batches the remaining scrolls (`CSI n S` + `CSI n A`,
+  pieces never span a background change). `copyOutput` coalesces frames that have already arrived
+  (`ExecSession.FrameReady`, up to 1 MiB) so that floods can be skipped. `shadow_test.go` checks
+  both against plain feeding with random output and fuzzes the whole output path.
 - Without a TTY: plain framed exec of the shell (`fallback.go`)
 
 Key files:
@@ -450,6 +475,12 @@ Test files:
 - `internal/host/execserver_test.go` - Exec socket against a fake endpoint: raw ↔ framed translation,
   half-close vs disconnect, validation, CLI client, stderr rate limiting, TTY requests and resize
   frames, bridge-lost exit frames, a bridge failing at stream open answers `not_ready`
+- `internal/host/tui/model_test.go` - Child output translation, replayed into a second `x/vt` emulator as
+  the host terminal: shell screen restored after an alternate-screen app (47/1047/1049), status bar
+  redraws keep the child's saved cursor and attributes, layout changes return to the child's cursor,
+  scroll-region and row clamping, resets, redraw after erase, a lost shell's state dropped
+- `internal/host/tui/shadow_test.go` - Batched/skipping shadow feeding equals plain feeding (random
+  output, several sizes), recovery from emulator panics, `FuzzWritePTYOutput`
 - `internal/host/shell_test.go` - `docker exec` argument building, stdio/exit code passthrough (fake `docker` on PATH)
 - `internal/host/remove_test.go` - `dworm remove` plan and docker calls with a fake `docker`: Compose project
   (all services, image order/dedup by tag, networks, volumes kept or removed, failures collected) and the
@@ -561,6 +592,7 @@ Host: yamux stream → git credential fill/approve/reject → response
 - `github.com/spf13/cobra` - CLI framework
 - `github.com/hashicorp/yamux` - Stream multiplexing
 - `github.com/charmbracelet/lipgloss` - Terminal styling for status bar
+- `github.com/charmbracelet/x/vt` - Terminal emulator behind the TUI's shadow screen
 - `github.com/creack/pty` - PTY handling for shell sessions
 - `golang.org/x/term` - Terminal mode handling
 

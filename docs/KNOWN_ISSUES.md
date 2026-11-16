@@ -6,13 +6,31 @@ This document tracks known limitations and potential issues with existing functi
 
 ### bubbleterm/bubbletea v2 incompatibility
 
-**Issue**: The original plan to migrate to Bubble Tea + bubbleterm for terminal embedding was blocked because bubbleterm requires bubbletea v2 (beta), which has compilation errors with current charmbracelet/x/ansi versions.
+**Issue**: The original plan to migrate to Bubble Tea + bubbleterm for terminal embedding was blocked because bubbleterm required bubbletea v2 (beta), which had compilation errors with the charmbracelet/x/ansi versions of the time. bubbletea v2 is stable now (`charm.land/bubbletea/v2`).
 
-**Current implementation**: Uses lipgloss for status bar styling but retains the 3-goroutine terminal handling architecture (output reader, input handler, event handler) with direct PTY I/O.
+**Current implementation**: Uses lipgloss for status bar styling and retains the 3-goroutine terminal handling architecture (output reader, input handler, event handler) with direct PTY I/O. Child output passes through to the host terminal; a shadow screen (`x/vt`, the emulator bubbleterm also uses) supplies repaints and cursor state (see below).
 
-**Future path**: When bubbletea v2 stabilizes, the TUI could be migrated to use bubbleterm for proper terminal emulation. This would enable damage tracking (partial screen updates) which improves SSH performance.
+**Future path**: Render everything from the emulator (bubbleterm). This would enable damage tracking (partial screen updates) which improves SSH performance, at the cost of passing nothing through: whatever the emulator does not implement would be lost, and keys would be re-encoded instead of forwarded as bytes.
 
 **Files affected**: `internal/host/tui/model.go`, `internal/host/tui/statusbar.go`
+
+### Shadow screen limits
+
+The TUI repaints the shell area from a terminal emulator (`charmbracelet/x/vt`, see
+`internal/host/tui/shadow.go`) when an application leaves its alternate screen, and uses it to put
+the cursor back after drawing the status bar. Where the emulator and the host terminal disagree, the
+repaint or the cursor can be off until the application redraws:
+
+- Sequences the emulator does not implement reach the host terminal but are missing from a
+  repaint.
+- When an application has saved a cursor (ESC 7) and the status bar is redrawn, the cursor returns
+  via CUP; a pending wrap at the right margin and the saved character set are lost. With left/right
+  margins enabled (mode 69), `CSI s` is not tracked as a cursor save.
+- A panic in the emulator resets the shadow screen (the session continues); the next repaint is
+  then empty.
+- Output floods: the emulator handles about 4 MB/s of printed text. dworm skips what scrolls off and
+  batches scrolling, so floods reach 20–60 MB/s of TUI throughput, but plain-text floods are
+  somewhat slower than without the shadow screen.
 
 ## Command Execution
 

@@ -181,3 +181,25 @@ not macOS runtime replacement validation.
 - `TestTTYClientsOverInstanceSocket` (`internal/endpoint`) fails intermittently
   (about 1 in 5 runs) with and without this change: a status bar redraw lands
   inside the expected output. It is not related to the release.
+
+## v0.9.2 validation record
+
+- `make test-race`, `go vet ./...`, `make build`, and `git diff --check` passed on
+  Linux amd64 (Go 1.27.2). `TestTTYClientsOverInstanceSocket` passed 10 of 10 race
+  runs after its scripts print each size line in one write (the documented flake).
+- TUI unit tests replay dworm's output into a second `x/vt` emulator standing in
+  for the host terminal (shell screen restored after modes 47/1047/1049, saved
+  cursor and attributes kept across status bar redraws, row and region clamping).
+  A randomized test checks that batched and skipping shadow feeding leaves the
+  emulator exactly as plain feeding does; `FuzzWritePTYOutput` ran for two minutes
+  (about 64k inputs) without failures.
+- In tmux (80×24) against this repository's devcontainer: after a curses
+  application, the shell lines and the prompt were back and the session stayed on
+  the TUI's screen (v0.9.1: host screen, cursor in row 0); after `top`, the prompt
+  was on the last shell row and the status bar intact (v0.9.1: prompt on the
+  status bar row).
+- 50 MB output flood through `dworm shell` on a PTY (200×60): 2.5 s plain and
+  2.6 s colored (v0.9.1 renderer: 1.8 s and 5.4 s).
+- Docker: `test-env-vars.sh`, `test-project-env.sh`, `test-devcontainer-env.sh`,
+  and `test-instance.sh` passed. The full Docker suite was not run; real terminal
+  emulators other than tmux were not tested.
